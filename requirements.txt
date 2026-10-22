@@ -1,0 +1,7 @@
+# Keep this list tiny: every package is code you trust.
+# After your first successful install, freeze exact versions:
+#   pip freeze > requirements.lock
+# and from then on install with:  pip install -r requirements.lock
+python-telegram-bot>=21.0,<23
+httpx>=0.27,<1
+# numpy: install with `pkg install python-numpy` in Termux (pip builds often fail there)
