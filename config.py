@@ -43,6 +43,7 @@ DB_PATH = DATA_DIR / "memory.db"
 MEMORY_MD = DATA_DIR / "MEMORY.md"                          # facts you approve; you can edit it
 SOURCES_FILE = DATA_DIR / "sources.txt"                     # URLs the Spider may fetch
 ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "")                  # optional: USB SSD folder for old raw cache
+LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))  # /save documents; point it into Slothvault to sync to Drive
 
 # --- Schedules ---
 SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))

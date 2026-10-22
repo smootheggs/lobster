@@ -78,6 +78,18 @@ def search(query: str, k: int = 6, min_score: float = 0.45) -> list[dict]:
     ]
 
 
+def facts_for_sources(urls: list[str], limit: int = 40) -> list[dict]:
+    """Web facts that came from these pages, oldest first (used by research briefs)."""
+    if not urls:
+        return []
+    con = _db()
+    marks = ",".join("?" * len(urls))
+    rows = con.execute(f"SELECT text, source FROM facts WHERE tag='web' AND source IN ({marks}) "
+                       f"ORDER BY id LIMIT ?", (*urls, limit)).fetchall()
+    con.close()
+    return [{"text": t, "source": s} for t, s in rows]
+
+
 def stats() -> dict:
     con = _db()
     counts = dict(con.execute("SELECT tag, COUNT(*) FROM facts GROUP BY tag").fetchall())

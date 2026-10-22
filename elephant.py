@@ -22,6 +22,7 @@ from pathlib import Path
 
 import memory
 import ollama
+import shiba
 from config import ARCHIVE_DIR, CACHE_DIR, EMBED_MODEL, MODEL
 
 INBOX = CACHE_DIR / "inbox"
@@ -164,19 +165,9 @@ def extract(chunk: str) -> list[str]:
 
 # --- 3. Policy validator (plain code, not a model) ---------------------------
 
-SUSPICIOUS = re.compile(
-    r"https?://|www\.|\bignore\b|\bdisregard\b|\bforget\b|\bsystem prompt\b|\binstruction|"
-    r"\byou (are|must|should|will|need)\b|\bassistant\b|\bai (model|system|agent)\b|"
-    r"\blobster\b|\belephant\b|\btelegram\b|\bpassword|\bapi key|\btoken\b|\bexecute\b|"
-    r"\brun (the|this)\b|\bclick\b|\bsend (it|this|to|me|your)\b|\bdownload\b|\bwallet\b|"
-    r"[<>{}`$\\]|\bdo not tell\b|\bsecret",
-    re.I,
-)
-
-
 def acceptable(fact: str) -> bool:
-    fact = fact.strip()
-    return 20 <= len(fact) <= 300 and not SUSPICIOUS.search(fact)
+    """The filter itself lives in Shiba, so all security rules sit in one sealed file."""
+    return shiba.fact_problem(fact) is None
 
 
 # --- 4. Pipeline -------------------------------------------------------------
@@ -187,10 +178,12 @@ def digest_file(path: Path) -> dict:
     kept, rejected = [], 0
     for c in chunks(text):
         for fact in extract(c):
-            if acceptable(fact):
+            problem = shiba.fact_problem(fact)
+            if problem is None:
                 kept.append(fact.strip())
             else:
                 rejected += 1
+                shiba.audit("fact_rejected", source=page["url"], reason=problem, fact=fact)
     stored = memory.add_facts(kept, "web", page["url"])
     return {"url": page["url"], "stored": stored, "rejected": rejected}
 
@@ -211,7 +204,7 @@ def _archive_old(days: int = 7) -> None:
 def digest() -> dict:
     for d in (INBOX, PROCESSED, FAILED):
         d.mkdir(parents=True, exist_ok=True)
-    report = {"pages": 0, "facts": 0, "rejected": 0, "failed": 0, "owner_synced": 0}
+    report = {"pages": 0, "facts": 0, "rejected": 0, "failed": 0, "owner_synced": 0, "suspicious": []}
     report["owner_synced"] = memory.sync_memory_md()
     for path in sorted(INBOX.glob("*.json")):
         try:
@@ -219,6 +212,8 @@ def digest() -> dict:
             report["pages"] += 1
             report["facts"] += r["stored"]
             report["rejected"] += r["rejected"]
+            if r["rejected"] >= shiba.SUSPICIOUS_PAGE:
+                report["suspicious"].append(r["url"])
             shutil.move(str(path), PROCESSED / path.name)
         except Exception:
             report["failed"] += 1

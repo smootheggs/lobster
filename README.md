@@ -1,4 +1,4 @@
-# 🦞 Lobster: steps 1–3
+# 🦞 Lobster: core (Lobster, Spider, Elephant, Shiba)
 
 One process on the Y700 runs everything:
 
@@ -7,6 +7,8 @@ One process on the Y700 runs everything:
 | 🦞 Lobster | `bot.py`, `brain.py`, `actions.py` | Talks to you on Telegram, picks actions from the allowlist | Only allowlisted actions |
 | 🕷️ Spider | `spider.py` | Downloads the pages in `sources.txt`, untouched | No model, no actions |
 | 🐘 Elephant | `elephant.py`, `memory.py` | Cleans pages, extracts facts, filters them, stores them tagged `web` | No actions |
+| 🐕 Shiba | `shiba.py`, `seal.py` | Gate for every action, approval, link and web fact; audit log; pause switch | Allows, asks you, or blocks. Plain code, no model |
+| 🔎 Research | `research.py` | The model proposes search words; the Spider fetches only from fixed providers; Lobster writes a brief | Words only, never links |
 
 **Daily rhythm ("feast and rest"):** the Spider fetches every 6 hours. When you plug the tablet in to charge, the Elephant digests the inbox, messages you a summary, and unloads the model to free RAM.
 
@@ -22,6 +24,8 @@ cd lobster
 pip install -r requirements.txt
 pip freeze > requirements.lock  # then use the lock file for future installs
 cp .env.example .env && nano .env
+python test_lobster.py         # everything must pass
+python seal.py                 # seal Shiba's rules (your signature)
 python bot.py
 ```
 
@@ -41,7 +45,12 @@ python bot.py
 - Talk normally: "remind me to buy a USB-C SSD", "remember I prefer window seats", "what do you know about copper?"
 - `/addsource https://example.com/feed.xml`: watch a page or RSS feed
 - `/crawl`, `/digest`: run the Spider or Elephant now
-- `/status`: model, memory, inbox, charging
+- `/status`: model, memory, inbox, Shiba, charging
+- `/research <question>` (or just "research English kings"): fetches articles, digests them, sends a brief with sources
+- `/save <url>`: keeps a document (PDF, HTML, text, CSV) in the Library with a receipt. Set `LIBRARY_DIR` inside your vault to sync it to Google Drive. `pip install pypdf` to index PDF text
+- `/removesource <url>`: stops watching a source (archived, not deleted)
+- `/pause` and `/resume`: freeze every write instantly
+- `/audit`: Shiba's last decisions
 
 ## How it stays safe
 
@@ -55,6 +64,13 @@ python bot.py
 - **No plugins, no shell, no file reading**, and a tiny pinned dependency list.
 
 `data/MEMORY.md` is yours: edit it by hand any time, and the next digest re-syncs it.
+
+## Shiba's rules
+
+- Every action goes through `shiba.decide()`: ALLOW, ASK (one-time approval card, valid 10 minutes, bound to that exact action) or BLOCK.
+- Links are refused if they point at the tablet, your home network or reserved addresses, checked again on every redirect.
+- Everything Shiba decides is in `data/audit.jsonl`. Several rejected facts from one page trigger a Telegram alert (max one per 10 minutes).
+- **The seal:** Lobster won't start if `identity.txt`, `actions.py` or `shiba.py` changed since you last ran `python seal.py`. After any update: read the changes, run the tests, then re-seal. Never let anything else run `seal.py` for you.
 
 ## Next
 4. Always-on local dashboard with a password (for when Telegram is blocked)

@@ -1,5 +1,7 @@
 """The allowlist. The Lobster can do these things and nothing else.
 
+Every action passes Shiba (shiba.decide) before it runs.
+
 Storage is append-only: records are added, never edited or removed, so no
 action here can destroy data. Completing a task appends a "done" record.
 
@@ -13,6 +15,8 @@ import json
 import time
 
 import memory
+import research
+import shiba
 from config import DATA_DIR
 
 NOTES = DATA_DIR / "notes.jsonl"
@@ -98,6 +102,13 @@ def search_memory(text: str) -> str:
                      for h in hits)
 
 
+def research_topic(text: str) -> str:
+    if not text.strip():
+        return "What should I research?"
+    job_id = research.enqueue(text.strip())
+    return f"🕷️ Research job #{job_id} queued. I'll send a brief when it's done, usually within a few minutes."
+
+
 ACTIONS = {
     "reply":         {"fn": None,          "tier": "read",    "desc": "just talk; no action"},
     "list_notes":    {"fn": list_notes,    "tier": "read",    "desc": "show recent notes"},
@@ -106,12 +117,13 @@ ACTIONS = {
     "save_note":     {"fn": save_note,     "tier": "write",   "desc": "save a note; text = the note"},
     "add_task":      {"fn": add_task,      "tier": "write",   "desc": "add a to-do; text = the task"},
     "remember":      {"fn": remember,      "tier": "write",   "desc": "store a lasting fact about the owner; text = the fact"},
+    "research":      {"fn": research_topic, "tier": "write",  "desc": "research a topic on the web and send a brief; text = the question"},
     "complete_task": {"fn": complete_task, "tier": "confirm", "desc": "mark a task done; text = task number"},
 }
 
 
 def needs_approval(action: str, tainted: bool) -> bool:
-    """The whole security policy in one place."""
+    """Kept for older callers; the policy itself lives in shiba.decide()."""
     tier = ACTIONS[action]["tier"]
     return tier == "confirm" or (tier == "write" and tainted)
 
@@ -120,4 +132,6 @@ def run_action(name: str, text: str) -> str:
     spec = ACTIONS.get(name)
     if spec is None:
         return "That action isn't allowed."
+    if shiba.paused() and spec["tier"] != "read":
+        return "⏸️ Lobster is paused. Nothing was changed."
     return spec["fn"](text) if spec["fn"] else ""
