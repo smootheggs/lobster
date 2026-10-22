@@ -1,4 +1,4 @@
-/* Lobster: OLED black. Soft white text (never pure white on pure black), raised surfaces
+/* Sloth Lobster: OLED black. Soft white text (never pure white on pure black), raised surfaces
    one step up so edges stay visible. Amber means "needs your OK"; coral means blocked or paused.
    Layout follows Material's window sizes: compact < 600, medium 600–839, expanded ≥ 840, large ≥ 1200. */
 :root {
@@ -70,6 +70,9 @@ a:hover { text-decoration: underline; }
 .dot.ready { background: var(--ok); }
 .dot.busy { background: var(--amber); }
 .dot.down { background: var(--coral); }
+.dot.off { background: transparent; box-shadow: inset 0 0 0 1.5px var(--amber); }
+.held { font-size: .78rem; color: var(--amber); white-space: nowrap; }
+.held-slot:empty { display: none; }
 
 /* --- Thread -------------------------------------------------------------------------- */
 .scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
@@ -114,7 +117,8 @@ a:hover { text-decoration: underline; }
 .ask .what { color: var(--text); overflow-wrap: anywhere; }
 .ask .why { font-size: .78rem; color: var(--muted); margin: 2px 0 10px; }
 .ask.settled { background: none; border: 0; padding: 0; }
-.ask.settled .what { color: var(--muted); font-size: .85rem; }
+.ask.settled .what { color: var(--muted); font-size: .85rem; display: flex; align-items: center; gap: 6px; }
+.ask.settled svg, .what svg { width: 14px; height: 14px; flex: none; }
 
 /* --- Buttons --------------------------------------------------------------------------- */
 .btn {
@@ -191,8 +195,8 @@ a:hover { text-decoration: underline; }
 .history .nav-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .guard-row { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
 
-.facts { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; margin: 0 0 16px; font-size: .92rem; }
-.facts dt { color: var(--muted); }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 16px; margin: 0 0 16px; font-size: .92rem; }
+.facts dt { color: var(--muted); white-space: nowrap; }
 .facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .sheet-title { font-weight: 600; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; }

@@ -1,6 +1,6 @@
 // Keeps the app's own files on the phone so it opens instantly.
 // Your data (/api, /library) is never cached: it always comes fresh from the tablet.
-const CACHE = "lobster-shell-2";
+const CACHE = "lobster-shell-4";
 const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png"];
 
 self.addEventListener("install", (e) => {

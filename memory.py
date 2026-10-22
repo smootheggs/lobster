@@ -369,7 +369,7 @@ def remember(text: str) -> None:
     """Append a fact to MEMORY.md (the source of truth) and index it."""
     MEMORY_MD.parent.mkdir(parents=True, exist_ok=True)
     if not MEMORY_MD.exists():
-        MEMORY_MD.write_text("# Things the Lobster knows about me\n\n", encoding="utf-8")
+        MEMORY_MD.write_text("# Things Sloth Lobster knows about me\n\n", encoding="utf-8")
     with MEMORY_MD.open("a", encoding="utf-8") as f:
         f.write(f"- {' '.join(text.split())}\n")
     add_facts([text.strip()], "owner", "MEMORY.md")

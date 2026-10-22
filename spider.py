@@ -3,7 +3,7 @@
 It has no model and never follows a link it found inside a page. It collects
 only two things:
   - research material from FIXED providers (Wikipedia's API, a news search),
-    for search words the Lobster gives it; it never chooses a site itself
+    for search words Sloth Lobster gives it; it never chooses a site itself
   - documents you asked it to /save, kept with a receipt
 
 Every link passes Shiba first (no local or private addresses, checked again on
@@ -13,6 +13,7 @@ requests to the same site, and retries politely.
 import hashlib
 import json
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -176,6 +177,27 @@ def to_inbox(page: dict, origin: str, job: int | None = None, question: str = ""
     record = dict(page, origin=origin, job=job, question=question)
     name = f"{time.time_ns()}-{hashlib.sha1(page['url'].encode()).hexdigest()[:10]}.json"
     write_atomic(INBOX / name, json.dumps(record, ensure_ascii=False))
+
+
+# --- Online or offline? ----------------------------------------------------------------
+
+_online = {"at": 0.0, "up": True}
+
+
+def online(max_age: float = 60) -> bool:
+    """Can the Spider reach the internet? A quick connection to Wikipedia (or to your proxy),
+    remembered for a minute. Offline, research waits in the queue instead of failing."""
+    if time.time() - _online["at"] < max_age:
+        return _online["up"]
+    target = urlparse(PROXY) if PROXY else urlparse(PROVIDERS["wikipedia"])
+    host, port = target.hostname, target.port
+    try:
+        socket.create_connection((host, port or 443), timeout=4).close()
+        up = True
+    except OSError:
+        up = False
+    _online.update(at=time.time(), up=up)
+    return up
 
 
 def inbox_count() -> int:

@@ -23,7 +23,7 @@ Rules this file enforces:
   - never overwrites: a name that's taken gets " (2)", " (3)"...
   - atomic: each file is written to a hidden temp file, then renamed, so sync never
     uploads half a note
-  - after writing, only the `status:` line of a Lobster note is ever changed, and only
+  - after writing, only the `status:` line of a Sloth Lobster note is ever changed, and only
     when you tap "Mark verified" or "Mark wrong"; your edits always win
   - reading back is cheap: only properties, only files changed since the last pass
 """
@@ -195,12 +195,12 @@ def write_map(map_id: str, title: str, question: str, job: int, points: list[tup
     lines = "\n".join(f"- {link(t)} [{n}]" for t, n in points)
     srcs = "\n".join(f"{i}. {link(s)}" for i, s in enumerate(sources, 1))
     body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\nQuestion: {question}\n\n## Points\n{lines}\n\n## Sources\n{srcs}\n\n"
-            "Gathered by Lobster from the web, not written by you. Review each card before relying on it.\n")
+            "Gathered by Sloth Lobster from the web, not written by you. Review each card before relying on it.\n")
     return _write_new(title, frontmatter(props) + body)
 
 
 def write_note(note_id: str, text: str, loci: list[str]) -> Path:
-    """A note you captured through Lobster: your own words, so made_by is you."""
+    """A note you captured through Sloth Lobster: your own words, so made_by is you."""
     first = re.split(r"(?<=[.!?])\s", text.strip(), 1)[0]
     props = {"id": note_id, "type": "note", "loci": loci, "status": "verified", "made_by": "you",
              "captured_by": "lobster", "created": today(), "card_version": CARD_VERSION}
@@ -218,7 +218,7 @@ def log(line: str) -> None:
 
 
 def ensure_review_view() -> None:
-    """A ready-made Obsidian Bases view of every unreviewed Lobster card (written once, then yours)."""
+    """A ready-made Obsidian Bases view of every unreviewed Sloth Lobster card (written once, then yours)."""
     path = INBOX / REVIEW_BASE
     if path.exists():
         return
@@ -232,7 +232,7 @@ def ensure_review_view() -> None:
 # --- Reading reviews back -------------------------------------------------------------
 
 def scan_reviews(full: bool = False) -> list[dict]:
-    """Lobster notes changed since the last pass: [{id, status, path}]. Looks across the whole
+    """Sloth Lobster notes changed since the last pass: [{id, status, path}]. Looks across the whole
     vault, so cards you promoted out of the inbox are still found (by id, not by name)."""
     if not VAULT_DIR.exists():
         return []
@@ -263,7 +263,7 @@ def scan_reviews(full: bool = False) -> list[dict]:
 
 
 def set_status(rel_path: str, card_id: str, status: str) -> bool:
-    """Change only the status line of one Lobster note, when you ask. Refuses anything else."""
+    """Change only the status line of one Sloth Lobster note, when you ask. Refuses anything else."""
     path = (VAULT_DIR / rel_path)
     if not _inside(path, VAULT_DIR) or not path.is_file():
         return False

@@ -1,4 +1,4 @@
-"""🦞 Research jobs: the Lobster executes, the Spider collects, the Elephant files.
+"""🦞 Research jobs: Sloth Lobster executes, the Spider collects, the Elephant files.
 
   1. Plan     - the model proposes a few search phrases. Words only, cleaned by code.
   2. Collect  - the Spider turns them into requests to FIXED providers (Wikipedia, a news

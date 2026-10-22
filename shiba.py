@@ -45,7 +45,7 @@ TEST_ALLOW_LOOPBACK = False   # only the test harness flips this, in-process
 # --- Audit log -------------------------------------------------------------------
 
 def audit(kind: str, **fields) -> None:
-    """Append one line to the audit log. Never raises: logging must not break Lobster."""
+    """Append one line to the audit log. Never raises: logging must not break Sloth Lobster."""
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         if AUDIT.exists() and AUDIT.stat().st_size > AUDIT_MAX_BYTES:
@@ -123,7 +123,7 @@ def decide(action: str, text: str, tainted: bool) -> tuple[str, str]:
     if spec is None:
         verdict, reason = BLOCK, "not on the allowlist"
     elif paused() and spec["tier"] != "read":
-        verdict, reason = BLOCK, "Lobster is paused"
+        verdict, reason = BLOCK, "Sloth Lobster is paused"
     elif (problem := text_problem(text)):
         verdict, reason = BLOCK, problem
     elif spec["tier"] == "confirm":
@@ -172,7 +172,7 @@ def redeem(code: str) -> tuple[dict | None, str]:
         return None, "That approval expired. Ask me again. Nothing was changed."
     if paused():
         audit("approval_refused", code=code[:4], reason="paused")
-        return None, "Lobster is paused. Nothing was changed."
+        return None, "Sloth Lobster is paused. Nothing was changed."
     audit("approval_redeemed", action=rec["action"], code=code[:4])
     return rec, ""
 
@@ -317,7 +317,7 @@ def grounding_problem(fact: str, sentence: str, window: str) -> str | None:
     return None
 
 
-# --- Outbound check (what Lobster sends you) -------------------------------------
+# --- Outbound check (what Sloth Lobster sends you) -------------------------------------
 
 URL_IN_TEXT = re.compile(r"https?://\S+|www\.\S+", re.I)
 

@@ -1,10 +1,10 @@
-// Lobster's app. Plain JavaScript, no libraries, no build step.
+// Sloth Lobster's app. Plain JavaScript, no libraries, no build step.
 // Everything the tablet sends is shown as text (never parsed as HTML), so a web page that
 // ends up in a brief can't run code here. Icons are fixed strings in this file.
 
 const S = {
   csrf: "", thread: [], status: null, mode: "chat", sheet: null, reader: null,
-  jobs: [], watching: new Set(), timer: null, busySending: false,
+  jobs: [], watching: new Set(), timer: null, busySending: false, unreachable: false,
 };
 
 // --- Tiny DOM helper: h("div", {class: "x", onclick: fn}, "text", child) ---------------------
@@ -55,6 +55,7 @@ function icon(name) {
 
 // --- Talking to the tablet --------------------------------------------------------------------
 class LoggedOut extends Error {}
+class Unreachable extends Error {}
 
 async function api(path, body) {
   const opts = { credentials: "same-origin", headers: {} };
@@ -68,7 +69,7 @@ async function api(path, body) {
   try {
     r = await fetch(path, opts);
   } catch {
-    throw new Error("Can't reach the tablet. Check that Tailscale or the Wi-Fi is on and Lobster is running.");
+    throw new Unreachable("Can't reach the tablet. Check that Tailscale or the Wi-Fi is on and Sloth Lobster is running.");
   }
   if (r.status === 401) throw new LoggedOut();
   const data = await r.json().catch(() => ({}));
@@ -99,11 +100,64 @@ function richText(text) {
   return out;
 }
 
+// --- Held notes: kept on this device while the tablet can't be reached ----------------------
+// Each note has its own id, so if the connection drops after the tablet saved it, sending it
+// again doesn't save it twice. At most 50 wait here; they go through Shiba like any note.
+const OUTBOX_KEY = "sloth-lobster-outbox";
+const OUTBOX_MAX = 50;
+const newId = () => (crypto.randomUUID ? crypto.randomUUID()
+  : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""));
+
+function outbox() {
+  try { const v = JSON.parse(localStorage.getItem(OUTBOX_KEY) || "[]"); return Array.isArray(v) ? v : []; }
+  catch { return []; }
+}
+function setOutbox(items) {
+  try { localStorage.setItem(OUTBOX_KEY, JSON.stringify(items)); return true; } catch { return false; }
+}
+function hold(note) {
+  const items = outbox();
+  if (items.length >= OUTBOX_MAX) return false;
+  return setOutbox([...items, note]);
+}
+
+let flushing = false;
+async function flushOutbox() {
+  if (flushing || !S.csrf || !outbox().length) return;
+  flushing = true;
+  try {
+    for (const note of outbox()) {
+      let reply;
+      try {
+        reply = (await api("/api/note", { id: note.id, text: note.text })).reply;
+      } catch (e) {
+        if (e instanceof Unreachable || e instanceof LoggedOut) break;   // try again later
+        reply = e.message;                                               // refused: show why, don't retry forever
+      }
+      setOutbox(outbox().filter((n) => n.id !== note.id));
+      S.thread.push({ t: "lob", text: `Held note sent: ${reply}` });
+    }
+  } finally {
+    flushing = false;
+    paintThread();
+    paintChrome();
+  }
+}
+setInterval(() => { if (!document.hidden) flushOutbox(); }, 15000);
+window.addEventListener("online", () => { flushOutbox(); refreshStatus(); });
+
+function heldChip() {
+  const n = outbox().length;
+  return n ? h("span", { class: "held", title: "Notes kept on this device until the tablet is reachable" }, `Waiting to send (${n})`) : null;
+}
+
 // --- Status --------------------------------------------------------------------------------------
 function dotState(s) {
+  if (S.unreachable) return ["down", "can't reach tablet"];
   if (!s) return ["", "…"];
   if (s.paused) return ["down", "paused"];
   if (!s.model_up) return ["down", "model down"];
+  if (s.online === false) return ["off", "offline"];
   if (s.busy || s.research_waiting || (s.now && s.now !== "idle")) return ["busy", "working"];
   return ["ready", "ready"];
 }
@@ -117,9 +171,12 @@ function dotButton() {
 async function refreshStatus() {
   try {
     S.status = await api("/api/status");
+    S.unreachable = false;
     if (S.watching.size) await refreshJobs();
+    flushOutbox();
   } catch (e) {
     if (e instanceof LoggedOut) return showLogin();
+    if (e instanceof Unreachable) S.unreachable = true;
   }
   paintChrome();
   schedule();
@@ -205,7 +262,7 @@ function paintThread() {
 
 // --- Composer: chat, or one of the four direct actions -------------------------------------------
 const MODES = {
-  chat: { placeholder: "Ask Lobster" },
+  chat: { placeholder: "Ask Sloth Lobster" },
   research: { chip: "Research", icon: "globe", placeholder: "Research a topic", path: "/api/research", key: "question" },
   ask: { chip: "Ask", icon: "ask", placeholder: "Ask your vault", path: "/api/ask", key: "question" },
   note: { chip: "Note", icon: "note", placeholder: "Write a note, exactly as it should be saved", path: "/api/note", key: "text" },
@@ -250,8 +307,19 @@ const submit = guard(async (raw) => {
   const wait = { t: "lob", text: "…", kind: "thinking" };
   S.thread.push(wait);
   paintThread();
+  const noteId = S.mode === "note" ? newId() : null;
   try {
-    const r = await api(mode.path || "/api/chat", mode.path ? { [mode.key]: text } : { text });
+    let r;
+    try {
+      r = await api(mode.path || "/api/chat", mode.path ? { [mode.key]: text, ...(noteId ? { id: noteId } : {}) } : { text });
+    } catch (e) {
+      if (!(noteId && e instanceof Unreachable)) { S.thread.splice(S.thread.indexOf(wait), 1); throw e; }
+      S.thread.splice(S.thread.indexOf(wait), 1);
+      S.thread.push(hold({ id: noteId, text, at: Date.now() })
+        ? { t: "lob", text: "📥 Held on this device. It's sent by itself when the tablet is reachable." }
+        : { t: "lob", text: `Can't hold more than ${OUTBOX_MAX} notes here. Copy this one somewhere safe.`, kind: "blocked" });
+      return;
+    }
     S.thread.splice(S.thread.indexOf(wait), 1);
     if (r.code && r.ask) {
       if (r.reply) S.thread.push({ t: "lob", text: r.reply.split("\n\n")[0] });
@@ -327,14 +395,23 @@ async function statusSheet() {
         dd("Blocked today", s.blocks_24h),
         dd("Typical research", s.research_seconds == null ? "not measured yet"
           : s.research_seconds < 90 ? `${Math.round(s.research_seconds)} s` : `${(s.research_seconds / 60).toFixed(1)} min`),
+        dd("Internet", s.online === false ? "offline · research waits" : "online"),
+        dd("Held here", `${outbox().length} waiting`),
+        ...(s.doors || []).flatMap((d) => dd(`App (${d.kind})`, d.url.replace("https://", ""))),
+        ...(s.wifi ? dd("Wi-Fi door", s.wifi) : []),
         dd("Last backup", s.last_backup || "never"),
         dd("Version", s.version)),
+      ...(s.ollama ? [h("p", { class: "error" }, `⚠️ ${s.ollama}`)] : []),
       h("div", { class: "row" },
         running ? h("button", { class: "btn", onclick: guard(async () => { say((await api("/api/stop", {})).reply); closeSheet(); refreshStatus(); }) }, "Stop research") : null,
         h("button", { class: s.paused ? "btn solid" : "btn danger", onclick: guard(async () => {
           say((await api(s.paused ? "/api/resume" : "/api/pause", {})).reply);
           closeSheet(); refreshStatus();
-        }) }, s.paused ? "Resume" : "Pause all writes")),
+        }) }, s.paused ? "Resume" : "Pause all writes"),
+        h("button", { class: "btn", onclick: guard(async () => {
+          await api("/api/logout_all", {});
+          showLogin();
+        }) }, "Log out everywhere")),
       h("ul", { class: "events", "aria-label": "Latest guard events" }, rows.slice(0, 6).map((r) => {
         const bad = r.verdict === "BLOCK" || /refused|lockout|rejected|error|rate_limited/.test(r.kind) || r.ok === false;
         const what = [r.kind.replaceAll("_", " "), r.action, r.verdict, r.reason && r.reason !== "ok" ? `(${r.reason})` : ""].filter(Boolean).join(" ");
@@ -456,6 +533,8 @@ function paintChrome() {
   if (side) side.replaceChildren(navigation());
   const top = document.querySelector(".topbar .dot-btn");
   if (top) top.replaceWith(dotButton());
+  const held = document.querySelector(".topbar .held-slot");
+  if (held) held.replaceChildren(...[heldChip()].filter(Boolean));
 }
 
 function renderApp() {
@@ -464,7 +543,8 @@ function renderApp() {
     h("main", { class: "chat" },
       h("header", { class: "topbar" },
         h("button", { class: "icon-btn menu", "aria-label": "Menu", onclick: () => openSheet("drawer"), icon: "menu" }),
-        h("div", { class: "title" }, "Lobster"),
+        h("div", { class: "title" }, "Sloth Lobster"),
+        h("span", { class: "held-slot" }, heldChip()),
         dotButton()),
       h("div", { class: "scroll" }, h("div", { class: "thread", id: "thread", "aria-live": "polite" })),
       composer())));
@@ -500,7 +580,7 @@ function showLogin() {
         btn.disabled = false;
       }
     },
-  }, h("h1", {}, "Lobster"), h("p", {}, "Your private agent on the tablet."), pw, err, btn)));
+  }, h("h1", {}, "Sloth Lobster"), h("p", {}, "Your private agent on the tablet."), pw, err, btn)));
   pw.focus();
 }
 
@@ -516,11 +596,25 @@ async function start() {
     for (const j of jobs) if (j.status === "waiting") S.watching.add(j.id);
   } catch (e) {
     if (e instanceof LoggedOut) return showLogin();
-    document.body.replaceChildren(h("p", { class: "boot" }, e.message));
+    if (!(e instanceof Unreachable)) {
+      document.body.replaceChildren(h("div", { class: "boot" }, h("p", {}, e.message),
+        h("button", { class: "btn", onclick: () => start() }, "Try again")));
+      return;
+    }
+    // The tablet can't be reached: open anyway, so notes can be held here until it can.
+    S.unreachable = true;
+    if (!document.querySelector(".app")) {
+      renderApp();
+      say("Can't reach the tablet right now. Notes you write are held on this device and sent later.");
+    }
+    clearTimeout(S.retry);
+    S.retry = setTimeout(start, 15000);
     return;
   }
+  S.unreachable = false;
   renderApp();
   schedule();
+  flushOutbox();
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});

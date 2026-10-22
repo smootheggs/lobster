@@ -1,4 +1,4 @@
-"""Settings for the Lobster. Values come from a .env file next to this one."""
+"""Settings for Sloth Lobster. Values come from a .env file next to this one."""
 import os
 import stat
 from pathlib import Path
@@ -37,7 +37,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 CHAT_KEEP_ALIVE = os.getenv("CHAT_KEEP_ALIVE", "5m")      # how long the model stays in RAM after a chat
 
 # --- Storage ---
-# Lobster's private working state stays on the tablet's internal storage.
+# Sloth Lobster's private working state stays on the tablet's internal storage.
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache"))   # the Spider's raw downloads
 DB_PATH = DATA_DIR / "memory.db"                             # the Elephant's index of facts and cards
@@ -58,8 +58,15 @@ LOCI = [l.strip() for l in os.getenv(
 # --- Web identity: sites like Wikipedia ask bots for a way to contact their owner ---
 CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or your GitHub URL
 
-# --- Local web app (off until you set WEB_BIND and run set_password.py) ---
-WEB_BIND = os.getenv("WEB_BIND", "")                 # the tablet's hotspot or Tailscale IP; never 0.0.0.0
+# --- The name you see ---
+APP_NAME = os.getenv("APP_NAME", "Sloth Lobster")
+
+# --- The app (off until you set WEB_BIND and run set_password.py) ---
+# Doors, comma-separated: "local" (the tablet itself), your Tailscale address, and "wifi"
+# (the tablet's Wi-Fi address, only on networks named in WEB_TRUSTED_WIFI). Never 0.0.0.0.
+WEB_BIND = os.getenv("WEB_BIND", "")
+WEB_TRUSTED_WIFI = [w.strip() for w in os.getenv("WEB_TRUSTED_WIFI", "").split(",") if w.strip()]
+WEB_TLS = os.getenv("WEB_TLS", "auto").lower()       # auto: HTTPS with Sloth Lobster's own certificate
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_ALLOW_ALL = os.getenv("WEB_ALLOW_ALL", "0") == "1"   # only if you really mean every network
 WEB_HOSTS = [h.strip().lower() for h in os.getenv("WEB_HOSTS", "").split(",") if h.strip()]  # extra names, e.g. Tailscale
@@ -70,7 +77,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.16"
+VERSION = "2026-10-22.18"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")

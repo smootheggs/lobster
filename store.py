@@ -1,4 +1,4 @@
-"""Small, safe file helpers shared by every part of Lobster.
+"""Small, safe file helpers shared by every part of Sloth Lobster.
 
   append_jsonl -> add one record to an append-only log
   read_jsonl   -> read a log back; a half-written last line (say, after the

@@ -3,6 +3,7 @@
 Ollama runs on this tablet, so requests here NEVER go through the proxy.
 """
 import json
+import time
 import threading
 import urllib.request
 
@@ -62,3 +63,33 @@ def alive() -> bool:
             return True
     except Exception:
         return False
+
+
+SAFE_VERSION = (0, 1, 29)     # fixes the DNS-rebinding flaw CVE-2024-28224
+
+
+_checked = {"at": -1e9, "problem": None}
+
+
+def version_problem(max_age: float = 600) -> str | None:
+    """A warning if the local Ollama is older than the version that fixed DNS rebinding.
+    Checked at most every 10 minutes."""
+    if time.time() - _checked["at"] < max_age:
+        return _checked["problem"]
+    _checked.update(at=time.time(), problem=_version_problem())
+    return _checked["problem"]
+
+
+def _version_problem() -> str | None:
+    try:
+        with _opener.open(f"{OLLAMA_URL}/api/version", timeout=5) as r:
+            v = json.loads(r.read()).get("version", "")
+    except Exception:
+        return None                                   # down or unknown: /status reports that separately
+    try:
+        parts = tuple(int(x) for x in v.split("-")[0].split(".")[:3])
+    except ValueError:
+        return None
+    if parts < SAFE_VERSION:
+        return f"Ollama {v} is older than {'.'.join(map(str, SAFE_VERSION))}; update it (pkg upgrade ollama)"
+    return None

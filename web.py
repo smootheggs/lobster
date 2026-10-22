@@ -1,15 +1,19 @@
-"""Lobster's local web app: a second door into the same house.
+"""Sloth Lobster's app: the same house, with several doors.
 
-The app on your phones talks to this small server, which runs inside the bot's
-process and calls the same conversation engine as Telegram, so every message
-gets exactly the same Shiba checks and one-time approval cards.
+The app on your phones and on the tablet talks to this small server, which runs inside the
+bot's process and calls the same conversation engine as Telegram, so every message gets
+exactly the same Shiba checks and one-time approval cards.
 
-The door's locks (all here, all plain code, sealed with Shiba's rules):
-  - off unless WEB_BIND and a password hash are set; never on 0.0.0.0 by accident
-  - only answers requests addressed to the tablet's own name (stops DNS tricks)
+The locks (all here, all plain code, sealed with Shiba's rules):
+  - doors only on private addresses: the tablet itself, Tailscale, and Wi-Fi networks you
+    named (WEB_TRUSTED_WIFI); never a public or mobile-data address, never 0.0.0.0 by accident
+  - HTTPS with Sloth Lobster's own certificate (certs.py), so an app pretending to be
+    Sloth Lobster can't receive your password or login
+  - only answers requests addressed to its own addresses (stops DNS-rebinding tricks)
   - the password is kept only as a scrypt hash, set by set_password.py
-  - 5 wrong passwords lock the door for 15 minutes, with an audit line and an alert
-  - sessions: random token, HttpOnly + SameSite=Strict cookie, 12 hours
+  - 5 wrong passwords lock the login for 15 minutes, with an audit line and an alert
+  - sessions: random token, HttpOnly + SameSite=Strict (+ Secure) cookie, 12 hours, stored
+    only as hashes; "log out everywhere"; a new password ends every session
   - every change needs the session's anti-forgery (CSRF) token and a JSON body
   - strict security headers on every response; files can't escape web/ or the Library
 """
@@ -19,8 +23,12 @@ import hmac
 import ipaddress
 import json
 import logging
+import os
 import secrets
+import shutil
 import ssl
+import sys
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +36,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import actions
+import certs
 import config
 import conversation
 import elephant
@@ -35,7 +44,8 @@ import memory
 import ollama
 import research
 import shiba
-from store import read_jsonl, timing_summary
+import spider
+from store import append_jsonl, read_jsonl, timing_summary
 
 log = logging.getLogger("lobster.web")
 
@@ -125,56 +135,125 @@ def confined(root: Path, rel: str) -> Path | None:
 # --- Sessions and the lockout ------------------------------------------------------------
 
 class Gate:
-    """Logins, sessions and the lockout. Thread-safe; sessions end when Lobster restarts."""
+    """Logins, sessions and the lockout. Thread-safe.
 
-    def __init__(self, password_hash: str, clock=time.time, notify=None):
+    Sessions survive a restart: only a SHA-256 of each login token is stored (data/web_sessions.json,
+    owner-only), and the anti-forgery token is derived from the login token with a server secret,
+    so the file holds nothing that lets anyone in. Changing the password ends every session.
+    """
+
+    def __init__(self, password_hash: str, clock=time.time, notify=None, store: Path | None = None):
         self.password_hash = password_hash
         self.clock = clock
         self.notify = notify or (lambda text: None)
         self.lock = threading.Lock()
-        self.sessions: dict[str, dict] = {}
+        self.store = store
+        self.fp = hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+        self.secret = self._secret()
+        self.sessions: dict[str, float] = self._load()      # token hash -> expiry
         self.fails = 0
         self.locked_until = 0.0
 
-    def login(self, password: str) -> tuple[dict | None, str]:
+    # --- storage ---
+    def _secret(self) -> bytes:
+        if self.store is None:
+            return secrets.token_bytes(32)
+        path = self.store / "web_secret"
+        try:
+            return bytes.fromhex(path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            key = secrets.token_bytes(32)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(key.hex())
+            return key
+
+    def _load(self) -> dict[str, float]:
+        if self.store is None:
+            return {}
+        try:
+            data = json.loads((self.store / "web_sessions.json").read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+        if data.get("fp") != self.fp:                        # the password changed: everyone logs in again
+            return {}
+        now = self.clock()
+        return {h: float(e) for h, e in data.get("sessions", {}).items() if float(e) > now}
+
+    def _save(self) -> None:
+        if self.store is None:
+            return
+        path = self.store / "web_sessions.json"
+        tmp = path.with_name(".web_sessions.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"fp": self.fp, "sessions": self.sessions}, f)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _h(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def _view(self, token: str, expires: float) -> dict:
+        csrf = hmac.new(self.secret, token.encode(), hashlib.sha256).hexdigest()
+        return {"token": token, "csrf": csrf, "expires": expires}
+
+    # --- logins ---
+    def login(self, password: str, source: str = "the network") -> tuple[dict | None, str]:
         with self.lock:
             now = self.clock()
             if now < self.locked_until:
-                shiba.audit("web_login", ok=False, reason="locked")
+                shiba.audit("web_login", ok=False, reason="locked", source=source)
                 return None, f"Too many wrong passwords. Try again in {int(self.locked_until - now) // 60 + 1} minutes."
             ok = bool(self.password_hash) and verify_password(password, self.password_hash)
-            shiba.audit("web_login", ok=ok)
+            shiba.audit("web_login", ok=ok, source=source)
             if not ok:
                 self.fails += 1
                 if self.fails >= MAX_FAILS:
                     self.fails, self.locked_until = 0, now + LOCK_SECONDS
-                    shiba.audit("web_lockout", minutes=LOCK_SECONDS // 60)
-                    self.notify(f"🐕 Shiba: {MAX_FAILS} wrong passwords on the web app. "
+                    shiba.audit("web_lockout", minutes=LOCK_SECONDS // 60, source=source)
+                    self.notify(f"🐕 Shiba: {MAX_FAILS} wrong passwords on the app, from {source}. "
                                 f"The login is locked for {LOCK_SECONDS // 60} minutes.")
                 return None, "Wrong password."
             self.fails = 0
-            session = {"token": secrets.token_urlsafe(32), "csrf": secrets.token_urlsafe(32),
-                       "expires": now + SESSION_SECONDS}
-            self.sessions = {t: s for t, s in self.sessions.items() if s["expires"] > now}
-            self.sessions[session["token"]] = session
-            return session, "ok"
+            token = secrets.token_urlsafe(32)
+            self.sessions = {h: e for h, e in self.sessions.items() if e > now}
+            self.sessions[self._h(token)] = now + SESSION_SECONDS
+            self._save()
+            return self._view(token, now + SESSION_SECONDS), "ok"
 
     def session(self, token: str | None) -> dict | None:
         if not token:
             return None
         with self.lock:
-            s = self.sessions.get(token)
-            if s and s["expires"] > self.clock():
-                return s
-            self.sessions.pop(token, None)
+            h = self._h(token)
+            e = self.sessions.get(h)
+            if e and e > self.clock():
+                return self._view(token, e)
+            if h in self.sessions:
+                self.sessions.pop(h)
+                self._save()
             return None
 
     def logout(self, token: str) -> None:
         with self.lock:
-            self.sessions.pop(token, None)
+            self.sessions.pop(self._h(token), None)
+            self._save()
+
+    def logout_all(self) -> int:
+        with self.lock:
+            n = len(self.sessions)
+            self.sessions = {}
+            self._save()
+        shiba.audit("web_logout_all", sessions=n)
+        return n
 
 
 # --- The app: routes -----------------------------------------------------------------------
+
+NOTE_IDS = config.DATA_DIR / "web_note_ids.jsonl"
+
 
 class App:
     """The app's API. Every route calls the same functions Telegram does (conversation.py)."""
@@ -182,6 +261,11 @@ class App:
     def __init__(self, gate: Gate, loop: asyncio.AbstractEventLoop, hosts: set[str],
                  busy=lambda: False, secure: bool = False, now=lambda: "idle"):
         self.gate, self.loop, self.hosts, self.busy, self.secure, self.now = gate, loop, hosts, busy, secure, now
+        self.doors: "Doors | None" = None
+        self.note_lock = threading.Lock()
+        # held notes from phones: each id saves exactly once, even across a restart
+        self.note_ids: dict[str, str] = {r["id"]: r.get("reply", "Saved.") for r in read_jsonl(NOTE_IDS)[-500:]
+                                         if isinstance(r, dict) and r.get("id")}
 
     def run(self, coro, timeout: int = 900):
         """Run a conversation step on the bot's event loop, where Telegram's run too."""
@@ -204,7 +288,10 @@ class App:
                 "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(),
                 "research_waiting": len(research.pending()), "now": self.now(), "busy": self.busy(),
                 "last_backup": memory.last_backup(), "research_seconds": t.get("research"),
-                "version": config.VERSION}
+                "online": spider.online(), "ollama": ollama.version_problem(),
+                "doors": self.doors.urls() if self.doors else [],
+                "wifi": self.doors.wifi_note if self.doors and "wifi" in self.doors.entries else None,
+                "name": config.APP_NAME, "version": config.VERSION}
 
     def research_list(self, s, q):
         return {"jobs": research.history(30)}
@@ -271,7 +358,21 @@ class App:
         return {"reply": conversation.ask(q), "hits": self.memory_search(s, {"q": [q]})["facts"] if q else []}
 
     def note(self, s, body):
-        return {"reply": conversation.note(self._text(body, "text") or "")}
+        """Held notes from a phone carry an id, so a resend after a dropped connection saves once."""
+        note_id = str(body.get("id", ""))[:64]
+        if not note_id:
+            return {"reply": conversation.note(self._text(body, "text") or "")}
+        with self.note_lock:
+            if note_id in self.note_ids:
+                return {"reply": self.note_ids[note_id], "duplicate": True}
+            was_paused = shiba.paused()
+            reply = conversation.note(self._text(body, "text") or "")
+            if not was_paused:                          # a paused note wasn't saved: it may be sent again
+                self.note_ids[note_id] = reply
+                append_jsonl(NOTE_IDS, {"id": note_id, "reply": reply[:300]})
+                if len(self.note_ids) > 1000:
+                    self.note_ids = dict(list(self.note_ids.items())[-500:])
+        return {"reply": reply}
 
     def save(self, s, body):
         return {"reply": conversation.save_link(self._text(body, "url", 1000) or "")}
@@ -287,7 +388,7 @@ class App:
         if status not in ("verified", "wrong", "unreviewed"):
             return {"ok": False, "reply": "Unknown review."}
         if shiba.paused():
-            return {"ok": False, "reply": "⏸️ Lobster is paused. Send /resume first."}
+            return {"ok": False, "reply": f"⏸️ {config.APP_NAME} is paused. Send /resume first."}
         ok = elephant.review(card_id, status)
         return {"ok": ok, "reply": f"Marked {status}." if ok else "Couldn't find that card in your vault."}
 
@@ -303,16 +404,21 @@ class App:
         self.gate.logout(s["token"])
         return {"reply": "Logged out."}
 
+    def logout_all(self, s, body):
+        n = self.gate.logout_all()
+        return {"reply": f"Logged out everywhere ({n} session{'s' if n != 1 else ''})."}
+
     GETS = {"/api/me": me, "/api/status": status, "/api/research": research_list, "/api/cards": cards_list,
             "/api/library": library, "/api/memory": memory_search, "/api/audit": audit_list}
     POSTS = {"/api/chat": chat, "/api/approve": approve, "/api/cancel": cancel, "/api/research": research_new,
              "/api/ask": ask, "/api/note": note, "/api/save": save, "/api/stop": stop, "/api/new": new,
-             "/api/review": review, "/api/pause": pause, "/api/resume": resume, "/api/logout": logout}
+             "/api/review": review, "/api/pause": pause, "/api/resume": resume, "/api/logout": logout,
+             "/api/logout_all": logout_all}
 
 
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "Lobster"
+        server_version = "SlothLobster"
         timeout = 30                            # a stalled connection can't hold a thread forever
         sys_version = ""
         protocol_version = "HTTP/1.1"
@@ -404,7 +510,7 @@ def make_handler(app: App):
             log.exception("web handler error")
             shiba.audit("handler_error", error=f"web: {type(e).__name__}")
             try:
-                self._error(500, "Something went wrong. Lobster is still running; details in the audit.")
+                self._error(500, f"Something went wrong. {config.APP_NAME} is still running; details in the audit.")
             except Exception:
                 pass
 
@@ -455,7 +561,8 @@ def make_handler(app: App):
             if body is None:
                 return self._error(415, "send JSON")
             if path == "/api/login":
-                session, why = app.gate.login(str(body.get("password", ""))[:200])
+                source = "this tablet" if self.client_address[0].startswith("127.") else "the network"
+                session, why = app.gate.login(str(body.get("password", ""))[:200], source)
                 if session is None:
                     return self._error(403 if "Wrong" in why else 429, why)
                 cookie = (f"{COOKIE}={session['token']}; HttpOnly; SameSite=Strict; Path=/; "
@@ -471,8 +578,9 @@ def make_handler(app: App):
             if route is None:
                 return self._error(404, "no such action")
             out = route(app, s, body)
-            extra = ({"Set-Cookie": f"{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"}
-                     if path == "/api/logout" else None)
+            extra = ({"Set-Cookie": f"{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"
+                                     + ("; Secure" if app.secure else "")}
+                     if path in ("/api/logout", "/api/logout_all") else None)
             return self._json(200, out, extra)
 
         do_HEAD = do_GET
@@ -480,30 +588,190 @@ def make_handler(app: App):
     return Handler
 
 
-def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None, now=lambda: "idle",
-          bind: str | None = None, port: int | None = None) -> ThreadingHTTPServer | None:
-    """Open the door, or explain why not. Returns the running server, or None."""
-    bind = config.WEB_BIND if bind is None else bind
-    port = config.WEB_PORT if port is None else port
-    problem = bind_problem(bind, config.WEB_ALLOW_ALL)
+# --- The doors: several addresses, one app ------------------------------------------------
+
+def parse_doors(text: str) -> list[str]:
+    """WEB_BIND, e.g. "local, 100.78.198.49, wifi" -> ["127.0.0.1", "100.78.198.49", "wifi"]."""
+    out = []
+    for part in (p.strip().lower() for p in text.split(",")):
+        if part:
+            out.append("127.0.0.1" if part in ("local", "localhost") else part)
+    return list(dict.fromkeys(out))
+
+
+def door_problem(entry: str, allow_all: bool = False) -> str | None:
+    """Why this door must stay shut, or None. Only private addresses, never 0.0.0.0 by accident."""
+    if entry == "wifi":
+        return None
+    problem = bind_problem(entry, allow_all)
     if problem:
-        log.info("Web app off: %s", problem)
+        return problem
+    if not allow_all and not certs.allowed_address(entry):
+        return f"{entry} is not a private address (only the tablet, Tailscale and home or hotspot networks)"
+    return None
+
+
+def wifi_info() -> dict | None:
+    """The tablet's Wi-Fi connection (Termux:API): {"ip", "ssid"}, or None when not on Wi-Fi.
+    Reading the network name needs Termux:API's location permission; without it the name is
+    unknown and the Wi-Fi door stays shut."""
+    if not shutil.which("termux-wifi-connectioninfo"):
+        return None
+    try:
+        out = subprocess.run(["termux-wifi-connectioninfo"], capture_output=True, text=True, timeout=15).stdout
+        d = json.loads(out)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if d.get("supplicant_state") != "COMPLETED" or not d.get("ip"):
+        return None
+    return {"ip": str(d["ip"]), "ssid": str(d.get("ssid", "")).strip('"')}
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """Failed handshakes (plain http://, a client that doesn't trust the certificate, port scans)
+    are expected noise: one audit-free log line instead of a traceback."""
+
+    def handle_error(self, request, client_address):
+        err = sys.exc_info()[1]
+        if isinstance(err, (ssl.SSLError, ConnectionError, TimeoutError)):
+            log.debug("App connection from %s dropped: %s", client_address[0], err)
+            return
+        super().handle_error(request, client_address)
+
+
+class Doors:
+    """Opens the app on each configured address, keeps them current, closes what no longer fits.
+
+    - "127.0.0.1" (local): the app on the tablet itself
+    - a Tailscale address: from anywhere, through Tailscale
+    - "wifi": the tablet's Wi-Fi address, but ONLY on networks you named in WEB_TRUSTED_WIFI
+      (your hotspot, home). On a café or hotel network this door stays shut.
+    Checked every minute. With HTTPS, the certificate is re-issued when the addresses change.
+    """
+
+    def __init__(self, app: "App", port: int, entries: list[str], trusted_wifi: list[str],
+                 tls: bool, wifi=wifi_info, extra_hosts: list[str] | None = None, manual_cert=None):
+        self.app, self.port, self.entries, self.tls = app, port, entries, tls
+        self.trusted = {t.strip() for t in trusted_wifi if t.strip()}
+        self.wifi, self.extra_hosts, self.manual_cert = wifi, extra_hosts or [], manual_cert
+        self.servers: dict[str, ThreadingHTTPServer] = {}
+        self.lock = threading.Lock()
+        self.ctx = None
+        self.cert_for: tuple = ()
+        self.wifi_note = ""
+        if tls:
+            self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self.ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            if manual_cert:
+                self.ctx.load_cert_chain(*manual_cert)
+
+    def wanted(self) -> list[str]:
+        out = []
+        for e in self.entries:
+            if e != "wifi":
+                out.append(e)
+                continue
+            w = self.wifi()
+            if w is None:
+                self.wifi_note = "not on Wi-Fi"
+            elif not self.tls:
+                self.wifi_note = "needs HTTPS (pkg install openssl-tool)"
+            elif w["ssid"] not in self.trusted:
+                self.wifi_note = f"“{w['ssid'] or 'unknown network'}” isn't a trusted network"
+            elif not certs.allowed_address(w["ip"]) or ipaddress.ip_address(w["ip"]).is_loopback:
+                self.wifi_note = f"{w['ip']} isn't a private Wi-Fi address"
+            else:
+                self.wifi_note = f"open on “{w['ssid']}”"
+                out.append(w["ip"])
+        return list(dict.fromkeys(out))
+
+    def refresh(self) -> list[str]:
+        with self.lock:
+            want = self.wanted()
+            if self.tls and not self.manual_cert and want and tuple(want) != self.cert_for:
+                cert, key = certs.leaf([a for a in want if certs.allowed_address(a)] or ["127.0.0.1"])
+                self.ctx.load_cert_chain(cert, key)        # new handshakes use the new certificate
+                self.cert_for = tuple(want)
+            for addr in [a for a in self.servers if a not in want]:
+                srv = self.servers.pop(addr)
+                srv.shutdown()
+                srv.server_close()
+                shiba.audit("web_door_closed", address=addr)
+            for addr in [a for a in want if a not in self.servers]:
+                try:
+                    self.servers[addr] = self._open(addr)
+                    shiba.audit("web_door_opened", address=addr, https=self.tls)
+                except OSError as e:                         # e.g. Tailscale isn't up yet: try again next minute
+                    log.info("App door %s not open yet: %s", addr, e)
+            hosts = set(self.servers) | set(self.extra_hosts)
+            if "127.0.0.1" in self.servers:
+                hosts.add("localhost")
+            self.app.hosts = hosts
+            return list(self.servers)
+
+    def _open(self, addr: str) -> ThreadingHTTPServer:
+        server = _QuietServer((addr, self.port), make_handler(self.app))
+        server.daemon_threads = True
+        if self.tls:
+            # The handshake happens in each connection's own thread, so a slow client can't block the door.
+            server.socket = self.ctx.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+        threading.Thread(target=server.serve_forever, name=f"web-{addr}", daemon=True).start()
+        return server
+
+    def urls(self) -> list[dict]:
+        scheme = "https" if self.tls else "http"
+        kind = lambda a: "this tablet" if a == "127.0.0.1" else "Tailscale" \
+            if ipaddress.ip_address(a) in ipaddress.ip_network("100.64.0.0/10") else "Wi-Fi"
+        return [{"url": f"{scheme}://{a}:{self.port}", "kind": kind(a)} for a in self.servers]
+
+    def watch(self, every: int = 60) -> None:
+        def loop():
+            while True:
+                time.sleep(every)
+                try:
+                    self.refresh()
+                except Exception:
+                    log.exception("App doors check failed")
+        threading.Thread(target=loop, name="web-doors", daemon=True).start()
+
+    def close(self) -> None:
+        with self.lock:
+            for srv in self.servers.values():
+                srv.shutdown()
+                srv.server_close()
+            self.servers = {}
+
+
+def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None, now=lambda: "idle",
+          bind: str | None = None, port: int | None = None) -> Doors | None:
+    """Open the app's doors, or explain why not. Returns the running Doors, or None."""
+    entries = parse_doors(config.WEB_BIND if bind is None else bind)
+    port = config.WEB_PORT if port is None else port
+    if not entries:
+        log.info("App off: WEB_BIND is empty")
+        return None
+    refused = [(e, door_problem(e, config.WEB_ALLOW_ALL)) for e in entries]
+    for e, problem in refused:
+        if problem:
+            log.warning("App door %s refused: %s", e, problem)
+    entries = [e for e, problem in refused if not problem]
+    if not entries:
         return None
     if not config.WEB_PASSWORD_HASH.startswith("scrypt$"):
-        log.warning("Web app off: no password yet. Run: python set_password.py")
+        log.warning("App off: no password yet. Run: python set_password.py")
         return None
-    gate = Gate(config.WEB_PASSWORD_HASH, notify=notify)
-    secure = bool(config.WEB_CERT and config.WEB_KEY)
-    app = App(gate, loop, allowed_hosts(bind, config.WEB_HOSTS), busy, secure, now)
-    server = ThreadingHTTPServer((bind, port), make_handler(app))
-    server.daemon_threads = True
-    if secure:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.load_cert_chain(config.WEB_CERT, config.WEB_KEY)
-        # The handshake happens in each connection's own thread, so a slow client can't block the door.
-        server.socket = ctx.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
-    threading.Thread(target=server.serve_forever, name="lobster-web", daemon=True).start()
-    shiba.audit("web_started", bind=bind, port=port, https=secure)
-    log.info("Web app on %s://%s:%s", "https" if secure else "http", bind, port)
-    return server
+    manual = (config.WEB_CERT, config.WEB_KEY) if config.WEB_CERT and config.WEB_KEY else None
+    tls = bool(manual) or (config.WEB_TLS != "off" and certs.available())
+    if config.WEB_TLS != "off" and not tls:
+        log.warning("App without HTTPS: install openssl (pkg install openssl-tool) and restart")
+    gate = Gate(config.WEB_PASSWORD_HASH, notify=notify, store=config.DATA_DIR)
+    app = App(gate, loop, set(), busy, tls, now)
+    doors = Doors(app, port, entries, config.WEB_TRUSTED_WIFI, tls, extra_hosts=config.WEB_HOSTS,
+                  manual_cert=manual)
+    app.doors = doors
+    opened = doors.refresh()
+    doors.watch()
+    shiba.audit("web_started", doors=", ".join(opened), https=tls)
+    for d in doors.urls():
+        log.info("App on %s (%s)", d["url"], d["kind"])
+    return doors

@@ -1,4 +1,4 @@
-"""The conversation engine: one decision path for every way you talk to Lobster.
+"""The conversation engine: one decision path for every way you talk to Sloth Lobster.
 
 Telegram and the web app are thin adapters that call these functions, so the
 safety logic exists exactly once:
@@ -11,10 +11,11 @@ safety logic exists exactly once:
             -> ALLOW: run it · ASK: one-time approval card · BLOCK: say why and what to do
 
 The session (recent history and the taint counter) is saved in
-data/session.json, so a restart doesn't make Lobster forget to be careful.
+data/session.json, so a restart doesn't make Sloth Lobster forget to be careful.
 """
 import asyncio
 import json
+import re
 
 import research as jobs
 import shiba
@@ -31,7 +32,7 @@ _turn = asyncio.Lock()  # Telegram and the web app take turns, so neither overwr
 
 LABELS = {"save_note": "Save note", "research": "Start research"}   # what approval buttons say
 NEXT_STEP = {           # what to tell you when Shiba blocks something
-    "Lobster is paused": "Send /resume first.",
+    "Sloth Lobster is paused": "Send /resume first.",
     "not on the allowlist": "That's not something I can do.",
     "control characters": "Remove the special characters and try again.",
     "longer than": "Try a shorter message, or split it in two.",
@@ -77,7 +78,56 @@ async def handle(text: str, busy: str | None = None) -> dict:
         return await _handle(text, busy)
 
 
+# Typed commands are handled by code, never guessed at by the model.
+COMMAND_HELP = ("Commands: /research <question>, /ask <question>, /note <text>, /save <link>, "
+                "/status, /stop, /new, /pause, /resume")
+
+
+def command(text: str) -> str | None:
+    """A message starting with "/" is a command. Returns the reply, or None if it isn't one."""
+    t = text.strip()
+    if not t.startswith("/"):
+        return None
+    name, _, arg = t[1:].partition(" ")
+    name = name.split("@")[0].lower()
+    simple = {"research": research, "ask": ask, "note": note, "save": save_link}
+    if name in simple:
+        return simple[name](arg)
+    if name == "stop":
+        return stop()
+    if name == "new":
+        return new_chat()
+    if name == "pause":
+        return shiba.pause()
+    if name == "resume":
+        return shiba.resume()
+    if name == "status":
+        return "Tap the dot at the top right for the full status." + (
+            f" {len(jobs.pending())} research job(s) waiting." if jobs.pending() else "")
+    return f"There's no /{name} command. {COMMAND_HELP}"
+
+
+# Small words that don't show what a message is about.
+_FILLER = set("""research about please could would should what when where which that this these those with
+look into find tell more some have want need does into from your there their them they then than also just
+like make know give show start check status jobs digest hello thanks okay sure yeah""".split())
+
+
+def _topic_words(text: str) -> set[str]:
+    words = re.findall(r"[^\W\d_]{4,}", text.lower())
+    return {w[:5] for w in words if w not in _FILLER}
+
+
+def _research_fits(message: str, question: str) -> bool:
+    """The model may only propose research about what your latest message is about.
+    Stops a small model from repeating an old topic when you say "hello" or "/status"."""
+    return bool(_topic_words(message) & _topic_words(question))
+
+
 async def _handle(text: str, busy: str | None) -> dict:
+    typed = command(text)
+    if typed is not None:
+        return {"reply": (f"{busy}\n\n" if busy else "") + typed, "code": None, "action": "command"}
     s = load_session()
     s["history"].append({"role": "user", "content": text})
     s["history"] = s["history"][-HISTORY_TURNS:]
@@ -96,14 +146,24 @@ async def _handle(text: str, busy: str | None) -> dict:
     s["taint_turns"] = max(0, s["taint_turns"] - 1)
 
     action, arg = decision["action"], decision["text"]
+    if action == "research":
+        same = next((j for j in jobs.pending() if j["question"].lower() == " ".join(arg.split()).lower()), None)
+        if same or not _research_fits(text, arg):
+            hint = (f"Research #{same['id']} on that is already queued." if same
+                    else f"If you'd like me to research “{arg}”, tap Research or send /research.")
+            reply = "\n\n".join(p for p in (decision["reply"] if not same else "", hint) if p)
+            s["history"].append({"role": "assistant", "content": reply})
+            save_session(s)
+            return {"reply": prefix + reply, "code": None, "action": "reply"}
     verdict, reason = shiba.decide(action, arg, tainted)
     if verdict == shiba.BLOCK:
         save_session(s)
         return {"reply": prefix + _blocked(action, reason), "code": None}
     if verdict == shiba.ASK:
-        save_session(s)
         label = LABELS.get(action, action)
         why = "web facts are in this chat" if tainted else "this action always asks"
+        s["history"].append({"role": "assistant", "content": f"(Asked for your OK: {label} “{arg}”.)"})
+        save_session(s)
         return {"reply": f"{prefix}{decision['reply']}\n\n{label} “{arg}”? I'm asking because {why}. "
                          "(valid 10 minutes)",
                 "code": shiba.new_approval(action, arg),
@@ -117,15 +177,25 @@ async def _handle(text: str, busy: str | None) -> dict:
     return {"reply": prefix + out, "code": None, "action": action}
 
 
+def _remember(line: str) -> None:
+    """Put the outcome of an approval card into the chat, so the model knows it's settled."""
+    s = load_session()
+    s["history"].append({"role": "assistant", "content": line})
+    save_session(s)
+
+
 async def approve(code: str) -> str:
     rec, why = shiba.redeem(code)
     if rec is None:
         return why
-    return await asyncio.to_thread(run_action, rec["action"], rec["text"]) or "Done."
+    result = await asyncio.to_thread(run_action, rec["action"], rec["text"]) or "Done."
+    _remember(f"(You approved: {LABELS.get(rec['action'], rec['action'])} “{rec['text']}”. Done; don't propose it again.)")
+    return result
 
 
 def cancel(code: str) -> str:
     shiba.cancel(code)
+    _remember("(You said no to that. Don't propose it again unless you ask.)")
     return "Cancelled. Nothing was changed."
 
 
@@ -153,7 +223,10 @@ def research(text: str) -> str:
     verdict, reason = shiba.decide("research", text, tainted=False)
     if verdict == shiba.BLOCK:
         return _blocked("research", reason)
-    return run_action("research", text)
+    reply = run_action("research", text)
+    if not spider.online() and not shiba.paused():
+        reply += "\n📴 The tablet is offline: it's queued and runs by itself when you're back online."
+    return reply
 
 
 def save_link(url: str) -> str:
@@ -161,7 +234,7 @@ def save_link(url: str) -> str:
     if not url.strip():
         return "Usage: /save <link>"
     if shiba.paused():
-        return "⏸️ Lobster is paused. Send /resume first."
+        return "⏸️ Sloth Lobster is paused. Send /resume first."
     return spider.save_document(url.strip())
 
 

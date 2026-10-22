@@ -1,4 +1,4 @@
-"""The allowlist. The Lobster can do these things and nothing else.
+"""The allowlist. Sloth Lobster can do these things and nothing else.
 
 Every action passes Shiba (shiba.decide) before it runs. Nothing here can
 delete data: notes and research jobs are appended, never edited or removed.
@@ -60,5 +60,5 @@ def run_action(name: str, text: str) -> str:
     if spec is None:
         return "That action isn't allowed."
     if shiba.paused() and spec["tier"] != "read":        # second gate, on purpose
-        return "⏸️ Lobster is paused. Nothing was changed."
+        return "⏸️ Sloth Lobster is paused. Nothing was changed."
     return spec["fn"](text) if spec["fn"] else ""

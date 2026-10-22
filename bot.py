@@ -1,4 +1,4 @@
-"""🦞 The Lobster's Telegram door, and the schedule that keeps everything moving.
+"""🦞 Sloth Lobster's Telegram door, and the schedule that keeps everything moving.
 
 Run with:  python bot.py
 
@@ -69,7 +69,7 @@ def now_line() -> str:
 
 
 def allowed(update: Update) -> bool:
-    """Only you can talk to the Lobster. Everyone else is silently ignored."""
+    """Only you can talk to Sloth Lobster. Everyone else is silently ignored."""
     user = update.effective_user
     if user and user.id == config.ALLOWED_USER_ID:
         return True
@@ -166,7 +166,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.error("Handler error: %s: %s", type(err).__name__, err)
     shiba.audit("handler_error", error=f"{type(err).__name__}: {err}")
-    await alert(ctx.bot, f"something went wrong ({type(err).__name__}). Lobster is still running.")
+    await alert(ctx.bot, f"something went wrong ({type(err).__name__}). Sloth Lobster is still running.")
 
 
 # --- Commands (no model involved) ----------------------------------------------------
@@ -214,13 +214,33 @@ def status_lines() -> list[str]:
         f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'on guard'}, {shiba.blocks_last_day()} blocked in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (install termux-api)'}",
         now_line(),
+        f"🌐 Internet: {'online' if spider.online() else 'OFFLINE (research waits in the queue)'}",
+        *door_lines(),
         f"💾 Last backup: {memory.last_backup() or 'never'} · version {config.VERSION}",
     ]
+
+
+def door_lines() -> list[str]:
+    doors = state.get("web")
+    lines = []
+    if doors:
+        lines += [f"🚪 App ({d['kind']}): {d['url']}" for d in doors.urls()]
+        if doors.wifi_note:
+            lines.append(f"🚪 Wi-Fi door: {doors.wifi_note}")
+    problem = ollama.version_problem()
+    if problem:
+        lines.append(f"⚠️ {problem}")
+    return lines
 
 
 @owner_only
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(await asyncio.to_thread(status_lines)))
+
+
+@owner_only
+async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(conversation.command(update.message.text or "/") or conversation.COMMAND_HELP)
 
 
 COMMANDS = {"research": cmd_research, "ask": cmd_ask, "note": cmd_note, "save": cmd_save,
@@ -277,6 +297,9 @@ async def run_research_jobs(app) -> None:
             if not waiting:
                 break
             job = waiting[0]
+            if not await asyncio.to_thread(spider.online):
+                state["now"] = f"offline: {len(waiting)} research job(s) wait for the internet"
+                return                               # tried again every 15 s; runs by itself when back
             research.STOP.clear()
             send = app.bot.send_message
             loop = asyncio.get_running_loop()
@@ -374,8 +397,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_error_handler(on_error)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(filters.COMMAND, cmd_unknown))     # e.g. /jobs: say what exists
     shiba.audit("started", model=config.MODEL)
-    log.info("Lobster %s starting (model=%s, vault=%s)", config.VERSION, config.MODEL, config.VAULT_DIR)
+    log.info("%s %s starting (model=%s, vault=%s)", config.APP_NAME, config.VERSION, config.MODEL, config.VAULT_DIR)
+    problem = ollama.version_problem()
+    if problem:
+        log.warning(problem)
     app.run_polling()
 
 

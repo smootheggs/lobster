@@ -3,7 +3,7 @@
     python set_password.py
 
 The password is typed hidden and never stored: only a scrypt hash goes into
-.env (as WEB_PASSWORD_HASH). Restart Lobster afterwards. Running it again
+.env (as WEB_PASSWORD_HASH). Restart Sloth Lobster afterwards. Running it again
 replaces the old password and logs out every open session on restart.
 """
 import getpass
@@ -29,4 +29,4 @@ if __name__ == "__main__":
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     os.replace(tmp, ENV_FILE)
-    print("🔑 Password set (only its hash is stored in .env). Restart Lobster to use it.")
+    print("🔑 Password set (only its hash is stored in .env). Restart Sloth Lobster to use it.")
