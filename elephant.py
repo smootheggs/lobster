@@ -166,9 +166,8 @@ def extract(chunk: str) -> list[str]:
 
 # --- 3. Policy validator (plain code, not a model) ---------------------------
 
-def acceptable(fact: str) -> bool:
-    """The filter itself lives in Shiba, so all security rules sit in one sealed file."""
-    return shiba.fact_problem(fact) is None
+# The fact filter itself lives in shiba.fact_problem(), so every security rule
+# sits in one sealed file.
 
 
 # --- 4. Pipeline -------------------------------------------------------------
@@ -220,7 +219,7 @@ def _job_of(path: Path):
         return None
 
 
-def digest(job: int | None = None, progress=None, should_stop=None) -> dict:
+def digest(job: int | None = None, progress=None, should_stop=None, unload: bool = True) -> dict:
     """Digest the inbox. With a job id, only that research job's pages.
 
     progress(i, n, url) is called after each page; should_stop() is checked
@@ -258,8 +257,9 @@ def digest(job: int | None = None, progress=None, should_stop=None) -> dict:
         if progress is not None:
             progress(i, len(paths), url)
     _archive_old()
-    ollama.unload(MODEL)           # feast over: free the RAM
-    ollama.unload(EMBED_MODEL)
+    if unload:                     # feast over: free the RAM (research keeps it warm for the brief)
+        ollama.unload(MODEL)
+        ollama.unload(EMBED_MODEL)
     return report
 
 

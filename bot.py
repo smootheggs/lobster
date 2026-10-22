@@ -9,6 +9,7 @@ One process does everything:
     digest when the tablet is charging ("feast"), then unloads the model ("rest")
 """
 import asyncio
+import functools
 import json
 import logging
 import shutil
@@ -43,7 +44,7 @@ log = logging.getLogger("lobster")
 TAINT_MEMORY = 6          # after seeing web facts, stay cautious for this many turns
 digest_lock = asyncio.Lock()
 research_lock = asyncio.Lock()
-state = {"last_crawl": 0.0, "last_digest": None, "offline_notified": set(), "now": "idle"}
+state = {"last_crawl": 0.0, "last_digest": None, "notified": set(), "now": "idle"}
 
 
 def _title(url: str) -> str:
@@ -65,6 +66,26 @@ def allowed(update: Update) -> bool:
     shiba.audit("stranger_ignored", user=str(user.id if user else "?"))
     log.warning("Ignored message from user %s", user.id if user else "?")
     return False
+
+
+def owner_only(handler):
+    """Every command and message handler runs only for you."""
+    @functools.wraps(handler)
+    async def wrapped(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if allowed(update):
+            return await handler(update, ctx)
+    return wrapped
+
+
+def paused_reply() -> str | None:
+    return "⏸️ Lobster is paused. /resume first." if shiba.paused() else None
+
+
+async def notify_once(bot, key, text: str) -> None:
+    """Say something once per situation (e.g. 'model offline' for one job), not every 30 seconds."""
+    if key not in state["notified"]:
+        state["notified"].add(key)
+        await bot.send_message(config.ALLOWED_USER_ID, text)
 
 
 async def alert(bot, text: str) -> None:
@@ -91,9 +112,9 @@ HELP = (
 )
 
 
+@owner_only
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        await update.message.reply_text(HELP)
+    await update.message.reply_text(HELP)
 
 
 def approval_buttons(code: str) -> InlineKeyboardMarkup:
@@ -103,9 +124,8 @@ def approval_buttons(code: str) -> InlineKeyboardMarkup:
     ]])
 
 
+@owner_only
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not allowed(update):
-        return
     if not shiba.message_allowed():
         await update.message.reply_text("🐕 Slow down a little: too many messages this minute.")
         return
@@ -170,6 +190,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     log.error("Handler error: %s: %s", type(err).__name__, err)
     shiba.audit("handler_error", error=f"{type(err).__name__}: {err}")
+    await alert(ctx.bot, f"something went wrong ({type(err).__name__}). Lobster is still running; details in /audit.")
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -192,115 +213,112 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- Commands you type yourself (no model involved) ---------------------------
 
+@owner_only
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not allowed(update):
-        return
     s = await asyncio.to_thread(memory.stats)
     charging = await asyncio.to_thread(is_charging)
-    guard = "⏸️ PAUSED" if shiba.paused() else "clear"
-    lines = [
-        f"🧠 Model server: {'up' if await asyncio.to_thread(ollama.alive) else 'DOWN'} ({config.MODEL})",
+    model_up = await asyncio.to_thread(ollama.alive)
+    await update.message.reply_text("\n".join([
+        f"🧠 Model server: {'up' if model_up else 'DOWN'} ({config.MODEL})",
         f"🐘 Memory: {s['owner']} owner facts, {s['web']} web facts",
-        f"🕷️ Inbox: {spider.inbox_count()} pages waiting, {len(spider.load_sources())} sources, "
-        f"{len(research.pending())} research jobs queued",
-        f"🐕 Shiba: {guard}, {shiba.blocks_last_day()} blocks or rejections in 24h",
+        f"🕷️ {len(spider.load_sources())} sources · {len(research.pending())} research jobs queued",
+        f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'clear'}, {shiba.blocks_last_day()} blocks or rejections in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (install termux-api)'}",
         now_line(),
         f"Last digest: {state['last_digest'] or 'never'} · version {config.VERSION}",
-    ]
+    ]))
+
+
+@owner_only
+async def cmd_sources(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    src = spider.load_sources()
+    await update.message.reply_text("\n".join(src) if src else "No sources yet. Use /addsource <url>.")
+
+
+@owner_only
+async def cmd_addsource(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = paused_reply() or (await asyncio.to_thread(spider.add_source, " ".join(ctx.args))
+                             if ctx.args else "Usage: /addsource <url>")
+    await update.message.reply_text(msg)
+
+
+@owner_only
+async def cmd_removesource(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = paused_reply() or (spider.remove_source(" ".join(ctx.args)) if ctx.args else "Usage: /removesource <url>")
+    await update.message.reply_text(msg)
+
+
+@owner_only
+async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if (msg := paused_reply()) or not ctx.args:
+        await update.message.reply_text(msg or "Usage: /save <url>")
+        return
+    await update.message.reply_text("📥 Fetching...")
+    await update.message.reply_text(await asyncio.to_thread(spider.save_document, ctx.args[0]))
+
+
+@owner_only
+async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    question = " ".join(ctx.args)
+    if not question:
+        await update.message.reply_text("Usage: /research <question>")
+        return
+    verdict, reason = shiba.decide("research", question, tainted=False)
+    if verdict == shiba.BLOCK:
+        await update.message.reply_text(f"🐕 Not queued: {reason}.")
+        return
+    await update.message.reply_text(run_action("research", question) + "\n" + now_line())
+
+
+@owner_only
+async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(shiba.pause())
+
+
+@owner_only
+async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(shiba.resume())
+
+
+@owner_only
+async def cmd_jobs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    lines = [now_line()] + [f"🔎 #{j['id']} waiting: {j['question']} (queued {j['ts'][11:]})"
+                            for j in research.pending()]
     await update.message.reply_text("\n".join(lines))
 
 
-async def cmd_sources(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        src = spider.load_sources()
-        await update.message.reply_text("\n".join(src) if src else "No sources yet. Use /addsource <url>.")
-
-
-def _writes_allowed() -> str | None:
-    return "⏸️ Lobster is paused. /resume first." if shiba.paused() else None
-
-
-async def cmd_addsource(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        msg = _writes_allowed() or (await asyncio.to_thread(spider.add_source, " ".join(ctx.args))
-                                    if ctx.args else "Usage: /addsource <url>")
-        await update.message.reply_text(msg)
-
-
-async def cmd_removesource(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        msg = _writes_allowed() or (spider.remove_source(" ".join(ctx.args))
-                                    if ctx.args else "Usage: /removesource <url>")
-        await update.message.reply_text(msg)
-
-
-async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        if (msg := _writes_allowed()) or not ctx.args:
-            await update.message.reply_text(msg or "Usage: /save <url>")
-            return
-        await update.message.reply_text("📥 Fetching...")
-        await update.message.reply_text(await asyncio.to_thread(spider.save_document, ctx.args[0]))
-
-
-async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        question = " ".join(ctx.args)
-        verdict, reason = shiba.decide("research", question, tainted=False)
-        if verdict == shiba.BLOCK or not question:
-            await update.message.reply_text(f"🐕 Not queued: {reason}." if question else "Usage: /research <question>")
-            return
-        await update.message.reply_text(run_action("research", question) + "\n" + now_line())
-
-
-async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        await update.message.reply_text(shiba.pause())
-
-
-async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        await update.message.reply_text(shiba.resume())
-
-
-async def cmd_jobs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        lines = [now_line()]
-        for job in research.pending():
-            lines.append(f"🔎 #{job['id']} waiting: {job['question']} (queued {job['ts'][11:]})")
-        await update.message.reply_text("\n".join(lines))
-
-
+@owner_only
 async def cmd_audit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        rows = shiba.recent(8)
-        if not rows:
-            await update.message.reply_text("🐕 Nothing logged yet.")
-            return
-        lines = [f"{r['ts'][5:16]} {r['kind']}"
-                 + (f" {r.get('action', '')} {r.get('verdict', '')}" if r["kind"] == "decision" else "")
-                 + (f" ({r['reason']})" if r.get("reason") and r.get("reason") != "ok" else "")
-                 for r in rows]
-        await update.message.reply_text("🐕 Last decisions:\n" + "\n".join(lines))
+    rows = shiba.recent(8)
+    lines = [f"{r['ts'][5:16]} {r['kind']}"
+             + (f" {r.get('action', '')} {r.get('verdict', '')}" if r["kind"] == "decision" else "")
+             + (f" ({r['reason']})" if r.get("reason") not in (None, "ok") else "")
+             for r in rows]
+    await update.message.reply_text("🐕 Last decisions:\n" + "\n".join(lines) if lines else "🐕 Nothing logged yet.")
 
 
+@owner_only
 async def cmd_retryfailed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        n = await asyncio.to_thread(elephant.retry_failed)
-        await update.message.reply_text(f"🐘 {n} failed pages moved back to the inbox. /digest to process them now.")
+    n = await asyncio.to_thread(elephant.retry_failed)
+    await update.message.reply_text(f"🐘 {n} failed pages moved back to the inbox. /digest to process them now.")
 
 
+@owner_only
 async def cmd_crawl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        await update.message.reply_text("🕷️ Crawling...")
-        await update.message.reply_text(await run_crawl())
+    await update.message.reply_text("🕷️ Crawling...")
+    await update.message.reply_text(await run_crawl())
 
 
+@owner_only
 async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if allowed(update):
-        await update.message.reply_text("🐘 Digesting... (this can take a while)")
-        await update.message.reply_text(await run_digest(ctx.bot))
+    await update.message.reply_text("🐘 Digesting... (this can take a while)")
+    await update.message.reply_text(await run_digest(ctx.bot))
+
+
+COMMANDS = {"status": cmd_status, "sources": cmd_sources, "addsource": cmd_addsource,
+            "removesource": cmd_removesource, "save": cmd_save, "research": cmd_research,
+            "pause": cmd_pause, "resume": cmd_resume, "jobs": cmd_jobs, "audit": cmd_audit,
+            "retryfailed": cmd_retryfailed, "crawl": cmd_crawl, "digest": cmd_digest}
 
 
 # --- Spider / Elephant / research schedule --------------------------------------
@@ -340,7 +358,7 @@ async def run_digest(bot=None, job: int | None = None, progress=None, background
     async with digest_lock:
         state["now"] = f"Elephant starting {label}"
         try:
-            r = await asyncio.to_thread(elephant.digest, job, track, stop)
+            r = await asyncio.to_thread(elephant.digest, job, track, stop, job is None)
         finally:
             state["now"] = "idle"
     if r["model_down"]:
@@ -364,17 +382,15 @@ async def run_research_jobs(app) -> None:
         for job in research.pending():
             send = app.bot.send_message
             if not await asyncio.to_thread(ollama.alive):
-                if ("model", job["id"]) not in state["offline_notified"]:
-                    state["offline_notified"].add(("model", job["id"]))
-                    await send(config.ALLOWED_USER_ID, f"🧠 Model offline. Research #{job['id']} waits until it's back.")
+                await notify_once(app.bot, ("model", job["id"]),
+                                  f"🧠 Model offline. Research #{job['id']} waits until it's back.")
                 return
             await send(config.ALLOWED_USER_ID, f"🕷️ Researching #{job['id']}: {job['question']}")
             state["now"] = f"Spider fetching for research #{job['id']}"
             gathered = await asyncio.to_thread(research.gather, job)
             if gathered["offline"]:
-                if job["id"] not in state["offline_notified"]:
-                    state["offline_notified"].add(job["id"])
-                    await send(config.ALLOWED_USER_ID, f"📴 Offline. Research #{job['id']} stays queued until I'm back online.")
+                await notify_once(app.bot, ("net", job["id"]),
+                                  f"📴 Offline. Research #{job['id']} stays queued until I'm back online.")
                 return
             if not gathered["urls"]:
                 research.mark_done(job["id"], "nothing found")
@@ -435,10 +451,7 @@ def main() -> None:
         builder = builder.proxy(config.PROXY).get_updates_proxy(config.PROXY)
     app = builder.build()
     app.add_handler(CommandHandler(["start", "help"], start))
-    for name, fn in [("status", cmd_status), ("sources", cmd_sources), ("addsource", cmd_addsource),
-                     ("removesource", cmd_removesource), ("save", cmd_save), ("research", cmd_research),
-                     ("pause", cmd_pause), ("resume", cmd_resume), ("audit", cmd_audit),
-                     ("crawl", cmd_crawl), ("digest", cmd_digest), ("retryfailed", cmd_retryfailed), ("jobs", cmd_jobs)]:
+    for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_error_handler(on_error)

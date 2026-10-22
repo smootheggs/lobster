@@ -45,10 +45,13 @@ SOURCES_FILE = DATA_DIR / "sources.txt"                     # URLs the Spider ma
 ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "")                  # optional: USB SSD folder for old raw cache
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))  # /save documents; point it into Slothvault to sync to Drive
 
+# --- Web identity: sites like Wikipedia ask bots for a way to contact their owner ---
+CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or your GitHub URL
+
 # --- Schedules ---
 SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.7"
+VERSION = "2026-10-22.9"
 
 IDENTITY = (BASE_DIR / "identity.txt").read_text(encoding="utf-8")

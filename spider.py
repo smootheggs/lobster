@@ -20,17 +20,19 @@ import urllib.robotparser
 from urllib.parse import unquote, urlparse
 
 import shiba
-from config import CACHE_DIR, DATA_DIR, LIBRARY_DIR, PROXY, SOURCES_FILE
+from config import CACHE_DIR, CONTACT, DATA_DIR, LIBRARY_DIR, PROXY, SOURCES_FILE
+from store import write_atomic
 
 MAX_BYTES = 2_000_000          # pages: anything longer is cut
 MAX_DOC_BYTES = 50_000_000     # /save documents: anything longer is refused
 MAX_REDIRECTS = 3
-DOMAIN_GAP = 10.0              # seconds between requests to the same site
+DOMAIN_GAP = 10.0              # seconds between requests to the same site (crawling)
+API_GAP = 1.0                  # official APIs built for programs (e.g. Wikipedia's) need less
 RETRIES = 2
 RETRY_BASE = 2.0               # seconds; doubles each retry
 TIMEOUT = 30
 AGENT = "LobsterSpider"
-USER_AGENT = f"Mozilla/5.0 (compatible; {AGENT}/1.0; personal research)"
+USER_AGENT = f"{AGENT}/1.0 ({CONTACT})"   # honest name + contact, as Wikimedia's policy asks
 
 PAGE_TYPES = ("text/html", "application/xhtml+xml", "application/xml", "text/xml",
               "application/rss+xml", "application/atom+xml", "application/rdf+xml",
@@ -73,8 +75,8 @@ _last_hit: dict[str, float] = {}
 _robots: dict[str, urllib.robotparser.RobotFileParser] = {}
 
 
-def _wait_turn(host: str) -> None:
-    gap = DOMAIN_GAP - (time.time() - _last_hit.get(host, 0.0))
+def _wait_turn(host: str, gap: float | None = None) -> None:
+    gap = (DOMAIN_GAP if gap is None else gap) - (time.time() - _last_hit.get(host, 0.0))
     if gap > 0:
         time.sleep(gap)
     _last_hit[host] = time.time()
@@ -103,7 +105,7 @@ def robots_allows(url: str, opener) -> bool:
 # --- Fetching --------------------------------------------------------------------
 
 def _get(url: str, opener, *, kinds, limit: int, truncate: bool,
-         headers: dict | None = None, robots: bool = True) -> dict:
+         headers: dict | None = None, robots: bool = True, gap: float | None = None) -> dict:
     """Download one URL under every rule. Returns bytes plus metadata."""
     problem = shiba.url_problem(url)
     if problem:
@@ -112,7 +114,7 @@ def _get(url: str, opener, *, kinds, limit: int, truncate: bool,
     if robots and not robots_allows(url, opener):
         shiba.audit("fetch_refused", url=url, reason="robots.txt")
         raise Refused("the site's robots.txt asks crawlers not to fetch it")
-    _wait_turn(urlparse(url).hostname or "")
+    _wait_turn(urlparse(url).hostname or "", gap)
     req = urllib.request.Request(url, headers=headers or {})
     for attempt in range(RETRIES + 1):
         try:
@@ -145,10 +147,10 @@ def _get(url: str, opener, *, kinds, limit: int, truncate: bool,
     raise Refused("gave up after retries")
 
 
-def fetch(url: str, opener, headers: dict | None = None, robots: bool = True) -> dict:
+def fetch(url: str, opener, headers: dict | None = None, robots: bool = True, gap: float | None = None) -> dict:
     """Fetch a page (HTML, feed, JSON or text) and return it decoded."""
     got = _get(url, opener, kinds=PAGE_TYPES, limit=MAX_BYTES, truncate=True,
-               headers=headers, robots=robots)
+               headers=headers, robots=robots, gap=gap)
     if got.get("not_modified"):
         return got
     return {
@@ -168,9 +170,7 @@ def to_inbox(page: dict, origin: str, job: int | None = None) -> None:
     INBOX.mkdir(parents=True, exist_ok=True)
     record = dict(page, origin=origin, job=job)
     name = f"{time.time_ns()}-{hashlib.sha1(page['url'].encode()).hexdigest()[:10]}.json"
-    tmp = INBOX / (name + ".tmp")
-    tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(INBOX / name)
+    write_atomic(INBOX / name, json.dumps(record, ensure_ascii=False))
 
 
 # --- Your source list --------------------------------------------------------------
@@ -207,9 +207,7 @@ def remove_source(url: str) -> str:
     with SOURCES_ARCHIVE.open("a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%Y-%m-%d %H:%M')} {url}\n")
     lines = [l for l in SOURCES_FILE.read_text(encoding="utf-8").splitlines() if l.strip() != url]
-    tmp = SOURCES_FILE.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    tmp.replace(SOURCES_FILE)
+    write_atomic(SOURCES_FILE, "\n".join(lines) + "\n")
     shiba.audit("source_removed", url=url)
     return f"🕷️ Stopped watching {url} (kept in sources-archive.txt)."
 
@@ -243,7 +241,7 @@ def crawl() -> dict:
         seen[url] = {"sha256": page["sha256"], "etag": page["etag"], "last_modified": page["last_modified"]}
         report["new"] += 1
     SEEN.parent.mkdir(parents=True, exist_ok=True)
-    SEEN.write_text(json.dumps(seen, indent=1))
+    write_atomic(SEEN, json.dumps(seen, indent=1))
     return report
 
 
@@ -304,13 +302,11 @@ def save_document(url: str) -> str:
     while path.exists():                              # never overwrite
         path = LIBRARY_DIR / name.replace(ext, f"-{n}{ext}")
         n += 1
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(got["raw"])
-    tmp.replace(path)
+    write_atomic(path, got["raw"])
     receipt = {"file": path.name, "url": url, "final_url": got["final_url"],
                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                "content_type": got["content_type"], "bytes": len(got["raw"]), "sha256": digest}
-    (LIBRARY_DIR / f"{path.name}.receipt.json").write_text(json.dumps(receipt, indent=1), encoding="utf-8")
+    write_atomic(LIBRARY_DIR / f"{path.name}.receipt.json", json.dumps(receipt, indent=1))
     shiba.audit("document_saved", url=url, file=path.name, bytes=len(got["raw"]))
 
     if got["content_type"] == "application/pdf":

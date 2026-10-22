@@ -11,40 +11,25 @@ Tiers:
                seen web facts (they could be trying to plant something)
   "confirm" -> always asks you to tap Yes first
 """
-import json
-import time
-
 import memory
 import research
 import shiba
+from store import append_jsonl, read_jsonl
 from config import DATA_DIR
 
 NOTES = DATA_DIR / "notes.jsonl"
 TASKS = DATA_DIR / "tasks.jsonl"
 
 
-def _append(path, record: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record["ts"] = time.strftime("%Y-%m-%d %H:%M")
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _read(path) -> list[dict]:
-    if not path.exists():
-        return []
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l]
-
-
 def save_note(text: str) -> str:
     if not text.strip():
         return "Nothing to save."
-    _append(NOTES, {"text": text.strip()})
+    append_jsonl(NOTES, {"text": text.strip()})
     return "📝 Saved."
 
 
 def list_notes(_: str = "") -> str:
-    notes = _read(NOTES)[-10:]
+    notes = read_jsonl(NOTES)[-10:]
     if not notes:
         return "No notes yet."
     return "\n".join(f"• {n['text']}  ({n['ts']})" for n in notes)
@@ -52,7 +37,7 @@ def list_notes(_: str = "") -> str:
 
 def _open_tasks() -> dict[int, dict]:
     tasks: dict[int, dict] = {}
-    for rec in _read(TASKS):
+    for rec in read_jsonl(TASKS):
         if rec["type"] == "add":
             tasks[rec["id"]] = rec
         elif rec["type"] == "done":
@@ -63,8 +48,8 @@ def _open_tasks() -> dict[int, dict]:
 def add_task(text: str) -> str:
     if not text.strip():
         return "No task given."
-    next_id = max((r["id"] for r in _read(TASKS)), default=0) + 1
-    _append(TASKS, {"type": "add", "id": next_id, "text": text.strip()})
+    next_id = max((r["id"] for r in read_jsonl(TASKS)), default=0) + 1
+    append_jsonl(TASKS, {"type": "add", "id": next_id, "text": text.strip()})
     return f"✅ Task #{next_id} added."
 
 
@@ -82,7 +67,7 @@ def complete_task(text: str) -> str:
     task_id = int(digits)
     if task_id not in _open_tasks():
         return f"No open task #{task_id}."
-    _append(TASKS, {"type": "done", "id": task_id})
+    append_jsonl(TASKS, {"type": "done", "id": task_id})
     return f"Task #{task_id} marked done."
 
 
@@ -122,16 +107,10 @@ ACTIONS = {
 }
 
 
-def needs_approval(action: str, tainted: bool) -> bool:
-    """Kept for older callers; the policy itself lives in shiba.decide()."""
-    tier = ACTIONS[action]["tier"]
-    return tier == "confirm" or (tier == "write" and tainted)
-
-
 def run_action(name: str, text: str) -> str:
     spec = ACTIONS.get(name)
     if spec is None:
         return "That action isn't allowed."
-    if shiba.paused() and spec["tier"] != "read":
+    if shiba.paused() and spec["tier"] != "read":        # second gate, on purpose
         return "⏸️ Lobster is paused. Nothing was changed."
     return spec["fn"](text) if spec["fn"] else ""

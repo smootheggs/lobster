@@ -22,14 +22,14 @@ def _post(path: str, payload: dict, timeout: int = 300) -> dict:
 
 
 def chat(model: str, messages: list[dict], schema: dict | None = None,
-         keep_alive: str | int = "5m", num_ctx: int = 4096) -> str:
+         keep_alive: str | int = "5m", num_ctx: int = 4096, temperature: float = 0.0) -> str:
     """Return the model's reply text. With a schema, Ollama forces valid JSON."""
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
         "keep_alive": keep_alive,
-        "options": {"temperature": 0.1, "num_ctx": num_ctx},
+        "options": {"temperature": temperature, "num_ctx": num_ctx},
     }
     if schema:
         payload["format"] = schema

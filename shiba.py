@@ -21,6 +21,7 @@ from collections import deque
 from urllib.parse import urlparse
 
 from config import BASE_DIR, DATA_DIR, PROXY
+from store import append_jsonl, read_jsonl, write_atomic
 
 ALLOW, ASK, BLOCK = "ALLOW", "ASK", "BLOCK"
 
@@ -48,25 +49,14 @@ def audit(kind: str, **fields) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         if AUDIT.exists() and AUDIT.stat().st_size > AUDIT_MAX_BYTES:
             AUDIT.rename(AUDIT.with_name(f"audit-{time.strftime('%Y%m%d-%H%M%S')}.jsonl"))
-        record = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind}
-        record.update({k: (v[:200] if isinstance(v, str) else v) for k, v in fields.items()})
-        with AUDIT.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        record = {"kind": kind, **{k: (v[:200] if isinstance(v, str) else v) for k, v in fields.items()}}
+        append_jsonl(AUDIT, {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), **record}, stamp=None)
     except Exception:
         pass
 
 
 def recent(n: int = 8) -> list[dict]:
-    if not AUDIT.exists():
-        return []
-    lines = AUDIT.read_text(encoding="utf-8").splitlines()[-n:]
-    out = []
-    for line in lines:
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    return read_jsonl(AUDIT)[-n:]
 
 
 def blocks_last_day() -> int:
@@ -155,10 +145,7 @@ def _load_approvals() -> dict:
 
 
 def _save_approvals(data: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = APPROVALS.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(APPROVALS)
+    write_atomic(APPROVALS, json.dumps(data))
 
 
 def new_approval(action: str, text: str) -> str:
