@@ -65,12 +65,20 @@ async function api(path, body) {
     opts.headers["X-CSRF-Token"] = S.csrf;
     opts.body = JSON.stringify(body);
   }
+  // A tablet that's off or asleep may never answer: give up after 20 seconds, so the app can
+  // say so and hold notes. Answers that use the model or fetch a document get 2 minutes.
+  const ctrl = new AbortController();
+  const slow = ["/api/chat", "/api/approve", "/api/save"].includes(path);
+  const timer = setTimeout(() => ctrl.abort(), slow ? 120000 : 20000);
+  opts.signal = ctrl.signal;
   let r;
   try {
     r = await fetch(path, opts);
   } catch {
+    clearTimeout(timer);
     throw new Unreachable("Can't reach the tablet. Check that Tailscale or the Wi-Fi is on and Sloth Lobster is running.");
   }
+  clearTimeout(timer);
   if (r.status === 401) throw new LoggedOut();
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `The tablet answered ${r.status}.`);
@@ -212,8 +220,19 @@ function say(text, kind = "") {
   paintThread();
 }
 
+// While waiting for a reply: the sloth rides his lobster across a small bubble. Pure CSS
+// (transform and opacity only), so it costs next to nothing; still with reduced motion.
+function slothThinking() {
+  return h("div", { class: "swim", role: "status", "aria-label": "Sloth Lobster is thinking" },
+    h("span", { class: "swim-wave" }),
+    h("div", { class: "swim-glide" },
+      h("span", { class: "swim-bub" }), h("span", { class: "swim-bub two" }),
+      h("img", { class: "swim-bob", src: "/sloth-lobster.svg", alt: "", width: "34", height: "28" })));
+}
+
 function item(m) {
   if (m.t === "me") return h("div", { class: "me" }, m.text);
+  if (m.t === "lob" && m.kind === "thinking") return slothThinking();
   if (m.t === "lob") return h("div", { class: `lob ${m.kind || ""}` }, m.text);
   if (m.t === "step") return h("div", { class: `step${m.live ? " live" : ""}`, icon: m.live ? "loader" : "check" }, m.text);
   if (m.t === "ask") return askCard(m);

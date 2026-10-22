@@ -1,7 +1,7 @@
 // Keeps the app's own files on the phone so it opens instantly.
 // Your data (/api, /library) is never cached: it always comes fresh from the tablet.
-const CACHE = "lobster-shell-5";
-const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png"];
+const CACHE = "lobster-shell-8";
+const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/sloth-lobster.svg", "/ripple.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

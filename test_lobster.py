@@ -1880,6 +1880,19 @@ def _():
         ollama._opener = real
 
 
+@test("the swimming sloth is plain artwork: no scripts, no links, cached for offline")
+def _():
+    web_dir = Path(__file__).parent / "web"
+    for f in ("sloth-lobster.svg", "ripple.svg", "icon.svg"):
+        art = (web_dir / f).read_text(encoding="utf-8").lower()
+        for bad in ("<script", "href", "onload", "javascript:", "<foreignobject", "@import"):
+            assert bad not in art, f"{f} contains {bad}"
+    sw = (web_dir / "sw.js").read_text(encoding="utf-8")
+    assert "/sloth-lobster.svg" in sw and "/ripple.svg" in sw
+    js = (web_dir / "app.js").read_text(encoding="utf-8")
+    assert "prefers-reduced-motion" in (web_dir / "style.css").read_text(encoding="utf-8") and "slothThinking" in js
+
+
 @test("everything you see says Sloth Lobster")
 def _():
     assert config.APP_NAME == "Sloth Lobster"
