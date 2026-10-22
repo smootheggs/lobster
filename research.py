@@ -23,8 +23,8 @@ from config import CHAT_KEEP_ALIVE, DATA_DIR, MODEL
 
 QUEUE = DATA_DIR / "research_queue.jsonl"
 MAX_SEARCHES = 4      # search phrases per job
-PER_SEARCH = 3        # articles per phrase
-MAX_PAGES = 10        # articles per job
+PER_SEARCH = 2        # articles per phrase
+MAX_PAGES = 5         # articles per job: about 15 model calls on the tablet
 MAX_FACTS = 40        # facts the brief may draw on
 
 PROVIDERS = {
@@ -56,6 +56,9 @@ def _append(record: dict) -> None:
 
 
 def enqueue(question: str) -> int:
+    for job in pending():                          # same question already waiting: reuse it
+        if job["question"].lower() == question.strip().lower():
+            return job["id"]
     job_id = max((r["id"] for r in _records()), default=0) + 1
     _append({"type": "queued", "id": job_id, "question": question.strip()})
     shiba.audit("research_queued", job=job_id, question=question)

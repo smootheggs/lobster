@@ -73,12 +73,15 @@ WIKI = {
         "Its rule ended when Richard III was killed at the Battle of Bosworth Field in 1485.",
     "Henry VIII": "Henry VIII was King of England from 1509 until his death in 1547. "
         "He broke with the Pope in the 1530s and became head of the Church of England. He married six times.",
+    "Augustus": "Augustus was the first Roman emperor, ruling from 27 BC until his death in AD 14. "
+        "He was the adopted son of Julius Caesar.",
     "Wars of the Roses": "The Wars of the Roses were civil wars between the houses of Lancaster and York from 1455 to 1487. "
         "Henry VII founded the Tudor dynasty after defeating Richard III in 1485.",
 }
 SEARCH = {"english monarchs": ["List of English monarchs", "Alfred the Great", "William the Conqueror"],
           "norman conquest": ["William the Conqueror", "House of Plantagenet"],
-          "house of tudor": ["Henry VIII", "Wars of the Roses"]}
+          "house of tudor": ["Henry VIII", "Wars of the Roses"],
+          "roman emperors": ["Augustus"]}
 
 
 def _sentences(text):
@@ -91,13 +94,15 @@ def fake_chat(payload):
     last = payload["messages"][-1]["content"]
     system = payload["messages"][0]["content"]
 
+    if "searches" in props and "Roman" in last:
+        return json.dumps({"searches": ["Roman emperors"], "needs_news": False})
     if "searches" in props:                    # research planning: words only, but try to sneak a link in
         return json.dumps({"searches": ["English monarchs", "Norman conquest https://evil.example/x",
                                         "House of Tudor; DROP TABLE"], "needs_news": False})
     if "research briefs" in system:            # research brief: summarise the fact lines, plus a planted link
         facts = [l[2:] for l in last.splitlines() if l.startswith("- ")][:6]
         return "\n".join(f"- {f}" for f in facts) + "\n- Read more at https://evil.example/kings [1]"
-    if "facts" in props and "England" in last:  # stand-in extractor for the research articles
+    if "facts" in props and ("England" in last or "Roman" in last):  # stand-in extractor for the research articles
         doc = last.split("<document>", 1)[-1].split("</document>", 1)[0]
         return json.dumps({"facts": _sentences(doc)[:8]})
 
@@ -230,6 +235,7 @@ import brain     # noqa: E402
 import config    # noqa: E402
 import elephant  # noqa: E402
 import memory    # noqa: E402
+import ollama    # noqa: E402
 import research  # noqa: E402
 import shiba     # noqa: E402
 import spider    # noqa: E402
@@ -278,6 +284,7 @@ MALICIOUS_PAGE = """<html><head><title>Metals weekly</title>
 
 # --- 3. The tests -------------------------------------------------------------
 
+print(f"\n🦞 Lobster {config.VERSION}")
 print("\n🧹 Cleaner")
 
 
@@ -435,6 +442,7 @@ def _():
         assert spider.add_source(url).startswith("❌"), f"accepted {url}"
     assert spider.add_source("https://www.ecb.europa.eu/rss/press.html").startswith("🕷️")
     assert spider.add_source("https://www.ecb.europa.eu/rss/press.html") == "Already watching that."
+    spider.remove_source("https://www.ecb.europa.eu/rss/press.html")   # tests never touch the real internet
 
 
 print("\n🐕 Shiba")
@@ -615,6 +623,36 @@ def _():
     assert not research.pending()
 
 
+@test("asking the same question twice doesn't queue two jobs")
+def _():
+    a = research.enqueue("Roman emperors")
+    assert research.enqueue("roman emperors ") == a
+    research.mark_done(a, "test")
+
+
+@test("the Elephant leaves pages in the inbox while the model is offline")
+def _():
+    spider.to_inbox({"url": "https://example.org/x", "content": "Text about England and its kings in 1066.",
+                     "content_type": "text/plain", "sha256": "x"}, origin="research")
+    real = ollama.alive
+    ollama.alive = lambda: False
+    try:
+        report = elephant.digest()
+    finally:
+        ollama.alive = real
+    assert report["model_down"] and spider.inbox_count() == 1, report
+    assert not list(elephant.FAILED.glob("*.json")), "pages were burned into failed/"
+    elephant.digest()
+
+
+@test("failed pages can be retried")
+def _():
+    elephant.FAILED.mkdir(parents=True, exist_ok=True)
+    (elephant.FAILED / "1-retry.json").write_text("{}")
+    assert elephant.retry_failed() == 1 and (elephant.INBOX / "1-retry.json").exists()
+    (elephant.INBOX / "1-retry.json").rename(elephant.FAILED / "1-retry.json")
+
+
 @test("research waits while paused")
 def _():
     shiba.pause()
@@ -713,6 +751,23 @@ if bot:
     def _():
         sent = _say("do something evil", {})
         assert sent and not sent[-1]["buttons"], sent
+
+    @test("research waits for a running digest instead of briefing on nothing")
+    def _():
+        async def scenario():
+            sent = []
+
+            async def send(uid, text):
+                sent.append(text)
+            app = _Obj(bot=_Obj(send_message=send), user_data={4242: {}})
+            research.enqueue("Who were the Roman emperors?")
+            await bot.digest_lock.acquire()            # as if /digest were already running
+            asyncio.get_running_loop().call_later(0.3, bot.digest_lock.release)
+            await bot.run_research_jobs(app)
+            return sent
+        sent = asyncio.run(scenario())
+        assert not any("Already digesting" in m for m in sent), sent
+        assert "Augustus" in sent[-1] and "No usable facts" not in sent[-1], sent[-1]
 
     @test("confirm-tier actions always ask")
     def _():

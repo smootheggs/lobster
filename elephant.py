@@ -31,6 +31,7 @@ FAILED = CACHE_DIR / "failed"
 
 CHUNK_CHARS = 3000      # fits comfortably in a small model's context window
 MAX_CHUNKS = 8          # per page; very long pages are only partly digested
+RESEARCH_CHUNKS = 3     # research articles: the opening sections carry most of the facts
 MAX_FACTS_PER_CHUNK = 15
 
 # --- 1. Deterministic cleaner ------------------------------------------------
@@ -117,9 +118,9 @@ def clean(page: dict) -> str:
     return html_to_text(content)
 
 
-def chunks(text: str) -> list[str]:
+def chunks(text: str, limit: int = MAX_CHUNKS) -> list[str]:
     out, i = [], 0
-    while i < len(text) and len(out) < MAX_CHUNKS:
+    while i < len(text) and len(out) < limit:
         end = min(i + CHUNK_CHARS, len(text))
         if end < len(text):                      # try to break at a sentence end
             cut = text.rfind(". ", i + CHUNK_CHARS // 2, end)
@@ -176,7 +177,8 @@ def digest_file(path: Path) -> dict:
     page = json.loads(path.read_text(encoding="utf-8"))
     text = clean(page)
     kept, rejected = [], 0
-    for c in chunks(text):
+    limit = RESEARCH_CHUNKS if page.get("origin") == "research" else MAX_CHUNKS
+    for c in chunks(text, limit):
         for fact in extract(c):
             problem = shiba.fact_problem(fact)
             if problem is None:
@@ -201,12 +203,37 @@ def _archive_old(days: int = 7) -> None:
             shutil.move(str(f), dest / f.name)
 
 
-def digest() -> dict:
+def retry_failed() -> int:
+    """Move failed pages back into the inbox (e.g. after the model was offline)."""
+    FAILED.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for f in sorted(FAILED.glob("*.json")):
+        shutil.move(str(f), INBOX / f.name)
+        moved += 1
+    return moved
+
+
+def _job_of(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("job")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def digest(job: int | None = None) -> dict:
+    """Digest the inbox. With a job id, only that research job's pages."""
     for d in (INBOX, PROCESSED, FAILED):
         d.mkdir(parents=True, exist_ok=True)
-    report = {"pages": 0, "facts": 0, "rejected": 0, "failed": 0, "owner_synced": 0, "suspicious": []}
+    report = {"pages": 0, "facts": 0, "rejected": 0, "failed": 0, "owner_synced": 0, "suspicious": [],
+              "model_down": False}
+    if not ollama.alive():          # don't burn pages into failed/ while the model is offline
+        report["model_down"] = True
+        return report
     report["owner_synced"] = memory.sync_memory_md()
-    for path in sorted(INBOX.glob("*.json")):
+    paths = sorted(INBOX.glob("*.json"))
+    if job is not None:
+        paths = [p for p in paths if _job_of(p) == job]
+    for path in paths:
         try:
             r = digest_file(path)
             report["pages"] += 1

@@ -51,6 +51,7 @@ python bot.py
 - `/removesource <url>`: stops watching a source (archived, not deleted)
 - `/pause` and `/resume`: freeze every write instantly
 - `/audit`: Shiba's last decisions
+- `/retryfailed`: move pages that failed (e.g. while Ollama was down) back into the inbox
 
 ## How it stays safe
 
