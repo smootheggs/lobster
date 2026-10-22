@@ -77,7 +77,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.18"
+VERSION = "2026-10-22.19"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")

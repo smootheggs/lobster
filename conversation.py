@@ -16,7 +16,9 @@ data/session.json, so a restart doesn't make Sloth Lobster forget to be careful.
 import asyncio
 import json
 import re
+import time
 
+import memory
 import research as jobs
 import shiba
 import spider
@@ -44,18 +46,37 @@ NEXT_STEP = {           # what to tell you when Shiba blocks something
 def load_session() -> dict:
     try:
         s = json.loads(SESSION.read_text(encoding="utf-8"))
-        return {"history": list(s.get("history", []))[-HISTORY_TURNS:], "taint_turns": int(s.get("taint_turns", 0))}
-    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
-        return {"history": [], "taint_turns": 0}
+        return {"history": list(s.get("history", []))[-HISTORY_TURNS:], "taint_turns": int(s.get("taint_turns", 0)),
+                "greeted": str(s.get("greeted", ""))}
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return {"history": [], "taint_turns": 0, "greeted": ""}
 
 
 def save_session(s: dict) -> None:
-    write_atomic(SESSION, json.dumps({"history": s["history"][-HISTORY_TURNS:], "taint_turns": s["taint_turns"]},
-                                     ensure_ascii=False))
+    write_atomic(SESSION, json.dumps({"history": s["history"][-HISTORY_TURNS:], "taint_turns": s["taint_turns"],
+                                      "greeted": s.get("greeted", "")}, ensure_ascii=False))
 
 
 def reset_session() -> None:
-    save_session({"history": [], "taint_turns": 0})
+    save_session({"history": [], "taint_turns": 0, "greeted": load_session().get("greeted", "")})
+
+
+def greeting(s: dict) -> str:
+    """🦥 The first chat of the day starts with one line about what's waiting for you. Code-written,
+    so it costs no model time; only once a day, so it stays a small touch."""
+    today = time.strftime("%Y-%m-%d")
+    if s.get("greeted") == today:
+        return ""
+    s["greeted"] = today
+    hour = time.localtime().tm_hour
+    part = "Morning" if hour < 12 else "Afternoon" if hour < 18 else "Evening"
+    try:
+        waiting = int(memory.stats().get("unreviewed", 0))
+    except Exception:
+        waiting = 0
+    if waiting:
+        return f"🦥 {part}. {waiting} card{'s' if waiting != 1 else ''} waiting for you whenever you like.\n\n"
+    return f"🦥 {part}.\n\n"
 
 
 def mark_tainted() -> None:
@@ -102,9 +123,9 @@ def command(text: str) -> str | None:
     if name == "resume":
         return shiba.resume()
     if name == "status":
-        return "Tap the dot at the top right for the full status." + (
+        return "🦞 Tap the dot at the top right for the full status." + (
             f" {len(jobs.pending())} research job(s) waiting." if jobs.pending() else "")
-    return f"There's no /{name} command. {COMMAND_HELP}"
+    return f"🦞 There's no /{name} command. {COMMAND_HELP}"
 
 
 # Small words that don't show what a message is about.
@@ -136,7 +157,7 @@ async def _handle(text: str, busy: str | None) -> dict:
         decision = await think(s["history"])
     except Exception as e:
         save_session(s)
-        return {"reply": f"{prefix}🧠 My model isn't responding ({type(e).__name__}). "
+        return {"reply": f"{prefix}🦞 My model is napping ({type(e).__name__}). "
                          "/note, /ask, /research, /save and /status still work.", "code": None}
 
     # Taint is sticky: web facts from earlier turns are still in the conversation.
@@ -149,7 +170,7 @@ async def _handle(text: str, busy: str | None) -> dict:
     if action == "research":
         same = next((j for j in jobs.pending() if j["question"].lower() == " ".join(arg.split()).lower()), None)
         if same or not _research_fits(text, arg):
-            hint = (f"Research #{same['id']} on that is already queued." if same
+            hint = (f"🦞 Research #{same['id']} on that is already queued." if same
                     else f"If you'd like me to research “{arg}”, tap Research or send /research.")
             reply = "\n\n".join(p for p in (decision["reply"] if not same else "", hint) if p)
             s["history"].append({"role": "assistant", "content": reply})
@@ -171,10 +192,11 @@ async def _handle(text: str, busy: str | None) -> dict:
 
     result = await asyncio.to_thread(run_action, action, arg)
     out = "\n\n".join(p for p in (decision["reply"], result) if p) or "🦞"
+    hello = greeting(s) if action == "reply" else ""
     # Don't feed raw memory search results back into the model's context.
     s["history"].append({"role": "assistant", "content": decision["reply"] if action == "ask" else out})
     save_session(s)
-    return {"reply": prefix + out, "code": None, "action": action}
+    return {"reply": prefix + hello + out, "code": None, "action": action}
 
 
 def _remember(line: str) -> None:
@@ -225,7 +247,7 @@ def research(text: str) -> str:
         return _blocked("research", reason)
     reply = run_action("research", text)
     if not spider.online() and not shiba.paused():
-        reply += "\n📴 The tablet is offline: it's queued and runs by itself when you're back online."
+        reply += "\nWe're offline, so it waits here and runs by itself once we're back online."
     return reply
 
 
@@ -234,16 +256,16 @@ def save_link(url: str) -> str:
     if not url.strip():
         return "Usage: /save <link>"
     if shiba.paused():
-        return "⏸️ Sloth Lobster is paused. Send /resume first."
+        return "🐕 Sloth Lobster is paused. Send /resume first."
     return spider.save_document(url.strip())
 
 
 def stop() -> str:
     n = jobs.stop_all()
-    return (f"⏹️ Stopped {n} research job{'s' if n != 1 else ''}. Whatever was already stored is kept."
-            if n else "Nothing is running.")
+    return (f"🦞 Stopped {n} research job{'s' if n != 1 else ''}. Everything already filed stays put."
+            if n else "🦞 Nothing's running.")
 
 
 def new_chat() -> str:
     reset_session()
-    return "🧽 Fresh start: chat history and caution cleared. Notes and memory are untouched."
+    return "🦥 Fresh start. Chat and caution cleared; your notes and memory are untouched."

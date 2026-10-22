@@ -295,9 +295,9 @@ def save_document(url: str) -> str:
     try:
         got = _get(url, _opener(), kinds=DOC_TYPES, limit=MAX_DOC_BYTES, truncate=False)
     except Refused as e:
-        return f"❌ Not saved: {e}."
+        return f"🕷️ Couldn't save that: {e}."
     except Exception as e:
-        return f"❌ Not saved: {type(e).__name__}."
+        return f"🕷️ Couldn't save that ({type(e).__name__})."
     digest = hashlib.sha256(got["raw"]).hexdigest()
     LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
     for receipt in LIBRARY_DIR.glob("*.receipt.json"):
@@ -328,6 +328,6 @@ def save_document(url: str) -> str:
         to_inbox({"url": url, "fetched_at": receipt["fetched_at"], "title": path.name,
                   "content_type": "text/plain" if ext == ".pdf" else got["content_type"],
                   "content": text, "sha256": digest}, origin="document")
-        return f"📄 Saved {path.name} ({size}) to the Library. The Elephant will index its text for /ask."
+        return f"🕷️ Saved {path.name} ({size}) to the Library. The Elephant will index it for /ask."
     note = " Install pypdf (pip install pypdf) to index PDF text." if ext == ".pdf" else ""
-    return f"📄 Saved {path.name} ({size}) to the Library.{note}"
+    return f"🕷️ Saved {path.name} ({size}) to the Library.{note}"

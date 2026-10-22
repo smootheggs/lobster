@@ -337,10 +337,10 @@ class App:
         if len(text) > MAX_CHAT:
             return {"reply": f"That's longer than {MAX_CHAT} characters. Try a shorter message.", "code": None}
         if not shiba.message_allowed():
-            return {"reply": "🐕 Slow down a little: too many messages this minute.", "code": None}
+            return {"reply": "🐕 Easy there: a few too many messages this minute. Give it a moment.", "code": None}
         if text == "/note" or text.startswith("/note "):
             return {"reply": conversation.note(text[5:].strip()), "code": None}
-        busy = "🐘 The Elephant is digesting, so replies may be slow." if self.busy() else None
+        busy = "🐘 The Elephant is digesting, so replies may be a little slow." if self.busy() else None
         r = self.run(conversation.handle(text, busy=busy))
         return {"reply": r["reply"], "code": r["code"], "ask": r.get("ask"), "action": r.get("action")}
 
@@ -388,7 +388,7 @@ class App:
         if status not in ("verified", "wrong", "unreviewed"):
             return {"ok": False, "reply": "Unknown review."}
         if shiba.paused():
-            return {"ok": False, "reply": f"⏸️ {config.APP_NAME} is paused. Send /resume first."}
+            return {"ok": False, "reply": f"🐕 {config.APP_NAME} is paused. Send /resume first."}
         ok = elephant.review(card_id, status)
         return {"ok": ok, "reply": f"Marked {status}." if ok else "Couldn't find that card in your vault."}
 
@@ -646,7 +646,8 @@ class Doors:
     - a Tailscale address: from anywhere, through Tailscale
     - "wifi": the tablet's Wi-Fi address, but ONLY on networks you named in WEB_TRUSTED_WIFI
       (your hotspot, home). On a café or hotel network this door stays shut.
-    Checked every minute. With HTTPS, the certificate is re-issued when the addresses change.
+    Checked every 15 seconds while a Wi-Fi door is configured (so the hotspot door opens quickly),
+    otherwise every minute. With HTTPS, the certificate is re-issued when the addresses change.
     """
 
     def __init__(self, app: "App", port: int, entries: list[str], trusted_wifi: list[str],
@@ -681,7 +682,7 @@ class Doors:
             elif not certs.allowed_address(w["ip"]) or ipaddress.ip_address(w["ip"]).is_loopback:
                 self.wifi_note = f"{w['ip']} isn't a private Wi-Fi address"
             else:
-                self.wifi_note = f"open on “{w['ssid']}”"
+                self.wifi_note = f"open on “{w['ssid']}” at {w['ip']}"
                 out.append(w["ip"])
         return list(dict.fromkeys(out))
 
@@ -770,7 +771,7 @@ def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None, now=
                   manual_cert=manual)
     app.doors = doors
     opened = doors.refresh()
-    doors.watch()
+    doors.watch(15 if "wifi" in entries else 60)
     shiba.audit("web_started", doors=", ".join(opened), https=tls)
     for d in doors.urls():
         log.info("App on %s (%s)", d["url"], d["kind"])

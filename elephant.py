@@ -481,7 +481,7 @@ def brief(job: dict, urls: list[str]) -> dict:
     Returns {"text", "topic", "cards"}; the text is what Telegram and the app show."""
     with timed("brief"):
         facts = memory.facts_for_sources(urls, limit=MAX_FACTS)
-        head = f"🔎 Research #{job['id']}: {job['question']}"
+        head = f"🐘 Research #{job['id']}: {job['question']}"
         if not facts:
             return {"text": f"{head}\n\nNo usable facts came back. Try a narrower question.", "topic": "", "cards": 0}
         topic, points = choose_points(job["question"], facts)
@@ -492,7 +492,7 @@ def brief(job: dict, urls: list[str]) -> dict:
         filed = ""
         try:
             n = file_brief(job, topic, [(facts[i], claim) for i, claim in points], list(numbers))
-            filed = f"\n\n📇 {n} new card{'s' if n != 1 else ''} in {vault.INBOX.name}, waiting for your review."
+            filed = f"\n\n{n} new card{'s' if n != 1 else ''} filed in {vault.INBOX.name}, waiting for your review."
         except Exception as e:              # the vault is optional: the brief still arrives
             shiba.audit("vault_write_failed", job=job["id"], error=f"{type(e).__name__}: {e}")
             filed = "\n\n(Couldn't write to the vault this time; the facts are saved in memory.)"
@@ -500,7 +500,7 @@ def brief(job: dict, urls: list[str]) -> dict:
         unread = len(urls) - len(numbers)
         also = f"\n(+{unread} more article{'s' if unread != 1 else ''} read; their facts are in memory for /ask)" if unread > 0 else ""
         text = (f"{head}\n\n" + "\n".join(bullets) + f"\n\nSources:\n{sources}{also}{filed}"
-                "\n\n🌐 Web facts: treat as untrusted until reviewed.")
+                "\n\nThese are web facts: worth a look before you rely on them.")
     return {"text": text, "topic": topic, "cards": len(points)}
 
 
@@ -552,10 +552,10 @@ def note(text: str) -> str:
         path = vault.write_note(nid, text, loci_for(text))
         memory.add_card(nid, "note", path.stem, vault.relative(path))
         vault.log(f"Note: {vault.link(path.stem)}")
-        return "📝 Saved to your vault inbox."
+        return "🐘 Saved to your vault inbox."
     except Exception as e:
         shiba.audit("vault_write_failed", error=f"{type(e).__name__}: {e}")
-        return "📝 Saved (to memory; the vault wasn't reachable)."
+        return "🐘 Saved to memory (the vault wasn't reachable this time)."
 
 
 def ask(question: str, k: int = 6) -> dict:
@@ -568,11 +568,11 @@ def ask(question: str, k: int = 6) -> dict:
     lines = []
     for h in hits:
         if h["tag"] == "owner":
-            lines.append(f"📝 {h['text']}")
+            lines.append(f"✎ {h['text']}")
         else:
             mark = "✓ " if h["status"] == "verified" else ""
-            lines.append(f"🌐 {mark}{h['text']}\n   ↳ {source_title(h['source'])}")
-    return {"text": "🐘 From your vault:\n\n" + "\n".join(lines), "hits": hits}
+            lines.append(f"• {mark}{h['text']}\n   ↳ {source_title(h['source'])}")
+    return {"text": "🐘 Here's what I remember:\n\n" + "\n".join(lines), "hits": hits}
 
 
 def sync_reviews() -> int:

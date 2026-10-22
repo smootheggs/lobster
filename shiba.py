@@ -77,7 +77,7 @@ def pause() -> str:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     PAUSE_FLAG.write_text(time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
     audit("paused")
-    return "⏸️ Paused. Every write is blocked; reading and /status still work. /resume when ready."
+    return "🐕 Paused. Every write waits; reading and /status still work. /resume when you're ready."
 
 
 def resume() -> str:

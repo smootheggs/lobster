@@ -115,3 +115,24 @@ It looks and works the same everywhere, and adapts to each screen:
 **Starts by itself:** copy `scripts/start-sloth-lobster.sh` to `~/.termux/boot/` (Termux:Boot) and `scripts/open-sloth-lobster.sh` to `~/.shortcuts/` (Termux:Widget). Logs go to `data/bot.log`.
 
 Never use `0.0.0.0`, and never forward a router port.
+
+## The cast
+
+| Who | Emoji | Speaks when |
+|---|---|---|
+| You, the sloth | 🦥 | rarely: the first chat of the day, a fresh start |
+| Lobster | 🦞 | replies, research queued, stops, offline |
+| Spider | 🕷️ | collecting, articles found, saved links |
+| Elephant | 🐘 | briefs, cards, `/ask`, notes, backups |
+| Shiba | 🐕 | approvals, blocks, pause, logins |
+
+Warm and a little playful, never overdone: one emoji per message, whoever is acting. Cards and briefs stay in the sources' own words.
+
+## Hotspot mode (no internet)
+
+One-time setup:
+1. On the S25: a hotspot password, "turn off when idle" set to Never, and the hotspot tile in Quick Settings.
+2. On the tablet: join the hotspot with auto-reconnect, set a static IP for it, keep Location on, and put its exact name in `WEB_TRUSTED_WIFI`.
+3. On the S25, with the hotspot on: open `https://<static IP>:8787` and install it as "Sloth Lobster (offline)".
+
+Then going offline is two taps: hotspot on, open the app. The door opens within about 15 seconds. If an app can't reach the tablet, its bar offers "Try hotspot" or "Try Tailscale".

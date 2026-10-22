@@ -524,7 +524,7 @@ def _():
 @test("a note becomes a trusted fact and a note in your vault inbox")
 def _():
     msg = actions.save_note("I prefer window seats on long flights.")
-    assert msg.startswith("📝 Saved to your vault"), msg
+    assert msg.startswith("🐘 Saved to your vault"), msg
     assert "window seats" in config.MEMORY_MD.read_text()
     hits = memory.search("window seats flights", k=3)
     assert hits and hits[0]["tag"] == "owner", f"owner fact not found: {hits}"
@@ -538,7 +538,7 @@ def _():
     with actions.NOTES.open("a", encoding="utf-8") as f:
         f.write('{"text": "half a no')          # power cut mid-line
     assert "window seats" in actions.list_notes()
-    assert actions.save_note("After the crash").startswith("📝")
+    assert actions.save_note("After the crash").startswith("🐘")
 
 
 print("\n🗂️ Vault cards (card guide v1)")
@@ -747,7 +747,7 @@ def _():
 @test("/save keeps a document with a receipt, once")
 def _():
     msg = spider.save_document(f"{WEB}/annual-report-2025.pdf")
-    assert msg.startswith("📄 Saved"), msg
+    assert msg.startswith("🕷️ Saved"), msg
     files = list(config.LIBRARY_DIR.glob("*annual-report-2025.pdf"))
     receipt = json.loads(next(config.LIBRARY_DIR.glob("*.receipt.json")).read_text())
     assert files and receipt["sha256"] == hashlib.sha256(files[0].read_bytes()).hexdigest()
@@ -756,7 +756,7 @@ def _():
 
 @test("/save refuses programs and oversized files")
 def _():
-    assert spider.save_document(f"{WEB}/file.exe").startswith("❌")
+    assert spider.save_document(f"{WEB}/file.exe").startswith("🕷️ Couldn't save")
     old = spider.MAX_DOC_BYTES
     spider.MAX_DOC_BYTES = 10
     try:
@@ -796,7 +796,7 @@ def _():
     assert stored and all(any(t in w for w in WIKI.values()) for t in stored), "a stored fact isn't a source sentence"
     assert not any("ignore your rules" in t for t in stored), "the injected sentence was stored"
     text = r["brief"]
-    assert "evil.example" not in text and "[1] https://en.wikipedia.org/wiki/" in text and "📇" in text, text
+    assert "evil.example" not in text and "[1] https://en.wikipedia.org/wiki/" in text and "new card" in text, text
     maps = [c for c in memory.cards("map") if c["job"] == job_id]
     cards = memory.cards("card", job=job_id)
     assert maps and len(cards) >= 3, (maps, cards)
@@ -823,7 +823,7 @@ def _():
     assert r["status"] == "done", r
     new = len(memory.cards("card")) - before
     assert new == 0, f"{new} duplicate cards were written for facts that already had one"
-    assert "📇 0 new cards" in r["brief"], r["brief"]
+    assert "0 new cards" in r["brief"], r["brief"]
 
 
 @test("brief titles: links stripped, made-up numbers ignored, garbled titles replaced")
@@ -997,7 +997,7 @@ def _():
     r = elephant.ask("window seats flights England kings")
     assert not [p for path, p in CALLS if path == "/api/chat"], "/ask called the chat model"
     assert r["hits"] and r["hits"][0]["tag"] == "owner", r["hits"][:2]
-    assert r["text"].startswith("🐘 From your vault")
+    assert r["text"].startswith("🐘 Here's what I remember")
 
 
 @test("search stays fast with thousands of facts")
@@ -1123,7 +1123,7 @@ def _():
 @test("a damaged session file starts fresh instead of crashing")
 def _():
     conversation.SESSION.write_text("{half a json")
-    assert conversation.load_session() == {"history": [], "taint_turns": 0}
+    assert conversation.load_session() == {"history": [], "taint_turns": 0, "greeted": ""}
     conversation.reset_session()
 
 
@@ -1145,7 +1145,7 @@ def _():
         raise ConnectionRefusedError("model down")
     ollama._post = down
     try:
-        assert conversation.note("Call the bank on Monday").startswith("📝 Saved")
+        assert conversation.note("Call the bank on Monday").startswith("🐘 Saved")
         assert "Call the bank on Monday" in actions.NOTES.read_text()
         shiba.pause()
         try:
@@ -1204,6 +1204,37 @@ def _():
 
 # --- Build 5: the local web app ---------------------------------------------------------
 
+@test("🦥 the first chat of the day gets one greeting, and only once")
+def _():
+    shiba._recent_messages.clear()
+    conversation.reset_session()
+    s = conversation.load_session()
+    s["greeted"] = "1999-01-01"
+    conversation.save_session(s)
+    first = asyncio.run(conversation.handle("what's new with copper"))["reply"]
+    second = asyncio.run(conversation.handle("and copper again"))["reply"]
+    assert first.startswith("🦥 ") and "Copper" in first, first
+    assert "🦥" not in second, "greeted twice in one day"
+    assert "🦥" not in conversation.ask("copper") and "🦥" not in conversation.note("A copper note")
+    conversation.reset_session()
+
+
+@test("every character speaks with its own emoji, and 🦥 never speaks for the Lobster's work")
+def _():
+    lines = [actions.run_action("research", "Copper prices in Chile"), conversation.stop(),
+             conversation.note("Copper is a metal"), conversation.ask("copper"), shiba.pause()]
+    shiba.resume()
+    for j in research.pending():
+        research.mark_done(j["id"], "stopped")
+    for line, who in zip(lines, ("🦞", "🦞", "🐘", "🐘", "🐕")):
+        assert line.startswith(who), (who, line)
+        assert "🦥" not in line, line
+    for f in ("actions.py", "conversation.py", "elephant.py", "spider.py", "research.py"):
+        text = (Path(__file__).parent / f).read_text(encoding="utf-8")
+        for old in ("📝", "📇", "📴", "⏹️", "⏸️", "🧽", "📚", "📄", "❌", "🔎", "🧠"):
+            assert old not in text, f"{f} still uses {old}"
+
+
 @test("typed commands in the app are handled by code: never the model, never an approval")
 def _():
     shiba._recent_messages.clear()
@@ -1217,7 +1248,7 @@ def _():
     r = asyncio.run(conversation.handle("/jobs"))
     assert "no /jobs command" in r["reply"] and "/research" in r["reply"], r["reply"]
     r = asyncio.run(conversation.handle("/note Bring the Westphalia book back"))
-    assert "Saved" in r["reply"] or "📝" in r["reply"], r["reply"]
+    assert "Saved" in r["reply"] or "🐘" in r["reply"], r["reply"]
     conversation.reset_session()
 
 
@@ -1353,10 +1384,10 @@ def _():
     c.login()
     c.req("POST", "/api/chat", {"text": "What are copper prices doing in October?"})
     _, r, _ = c.req("POST", "/api/chat", {"text": "please save a note"})
-    assert c.req("POST", "/api/approve", {"code": r["code"]})[1]["reply"].startswith("📝 Saved")
+    assert c.req("POST", "/api/approve", {"code": r["code"]})[1]["reply"].startswith("🐘 Saved")
     again = c.req("POST", "/api/approve", {"code": r["code"]})[1]["reply"]
-    assert not again.startswith("📝 Saved"), "the same approval worked twice"
-    assert not c.req("POST", "/api/approve", {"code": "made-up"})[1]["reply"].startswith("📝 Saved")
+    assert not again.startswith("🐘 Saved"), "the same approval worked twice"
+    assert not c.req("POST", "/api/approve", {"code": "made-up"})[1]["reply"].startswith("🐘 Saved")
     conversation.reset_session()
 
 
@@ -1466,7 +1497,7 @@ def _():
     finally:
         c.req("POST", "/api/resume", {})
     assert not shiba.paused()
-    assert c.req("POST", "/api/chat", {"text": "/note from the app"})[1]["reply"].startswith("📝 Saved")
+    assert c.req("POST", "/api/chat", {"text": "/note from the app"})[1]["reply"].startswith("🐘 Saved")
     assert "should not save" not in actions.NOTES.read_text()
 
 
@@ -1499,12 +1530,12 @@ def _():
     assert all(x["status"] == "unreviewed" for x in c.req("GET", "/api/cards?status=unreviewed")[1]["cards"])
     code, r, _ = c.req("POST", "/api/research", {"question": "Who built Hadrian's Wall?"})
     assert code == 200 and "#" in r["reply"], r
-    assert c.req("POST", "/api/stop", {})[1]["reply"].startswith("⏹️")
+    assert c.req("POST", "/api/stop", {})[1]["reply"].startswith("🦞")
     research.STOP.clear()
     r = c.req("POST", "/api/ask", {"question": "window seats"})[1]
     assert r["reply"].startswith("🐘") and r["hits"], r
-    assert c.req("POST", "/api/note", {"text": "Typed in the app"})[1]["reply"].startswith("📝 Saved")
-    assert c.req("POST", "/api/new", {})[1]["reply"].startswith("🧽")
+    assert c.req("POST", "/api/note", {"text": "Typed in the app"})[1]["reply"].startswith("🐘 Saved")
+    assert c.req("POST", "/api/new", {})[1]["reply"].startswith("🦥")
     assert c.req("GET", "/")[0] == 200
 
 
@@ -1530,7 +1561,7 @@ def _():
     c.login()
     shiba._recent_messages.clear()
     shiba._recent_messages.extend([__import__("time").time()] * shiba.MAX_MESSAGES_PER_MINUTE)
-    assert "Slow down" in c.req("POST", "/api/chat", {"text": "hello"})[1]["reply"]
+    assert "Easy there" in c.req("POST", "/api/chat", {"text": "hello"})[1]["reply"]
     shiba._recent_messages.clear()
 
 
@@ -1573,7 +1604,7 @@ def _():
     d = _doors(None)
     assert d.wanted() == ["127.0.0.1"] and d.wifi_note == "not on Wi-Fi"
     d = _doors({"ip": "192.168.43.20", "ssid": "Jose S25"})
-    assert d.wanted() == ["127.0.0.1", "192.168.43.20"] and "open" in d.wifi_note
+    assert d.wanted() == ["127.0.0.1", "192.168.43.20"] and "open" in d.wifi_note and "192.168.43.20" in d.wifi_note
     d = _doors({"ip": "192.168.43.20", "ssid": "Jose S25 "}, trusted=("jose s25",))
     assert d.wanted() == ["127.0.0.1"], "network names must match exactly"
 
@@ -1685,6 +1716,24 @@ def _():
     assert g2.session("forged-" + view["token"]) is None
     assert g2.logout_all() == 1 and g2.session(view["token"]) is None
     assert web.Gate(pw, notify=_alerts.append, store=store_dir).session(view["token"]) is None
+
+
+@test("the app's 'Try hotspot' links can only point at Sloth Lobster's private doors")
+def _():
+    import shutil as _sh
+    js = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+    line = next(l for l in js.splitlines() if l.startswith("const PRIVATE"))
+    assert "rememberDoors(" in js and "PRIVATE.test" in js
+    if not _sh.which("node"):
+        print("     (node not installed: checked the code, not the pattern)")
+        return
+    cases = {"https://192.168.43.50:8787": True, "https://100.78.198.49:8787": True, "https://127.0.0.1:8787": True,
+             "https://evil.com:8787": False, "https://8.8.8.8:8787": False, "http://192.168.1.1:8787": False,
+             "https://100.128.0.1:8787": False, "https://192.168.1.1:8787/x": False, "javascript:alert(1)": False,
+             "https://192.168.1.1.evil.com:8787": False}
+    code = line.replace("const PRIVATE", "var PRIVATE") + f"; console.log(JSON.stringify({json.dumps(list(cases))}.map(u => PRIVATE.test(u))))"
+    out = json.loads(subprocess.run(["node", "-e", code], capture_output=True, text=True, timeout=30).stdout)
+    assert out == list(cases.values()), dict(zip(cases, out))
 
 
 @test("a new password ends every session")
@@ -1887,8 +1936,8 @@ if bot:
         _say("What are copper prices doing in October?", ud)
         sent = _say("please save a note", ud)
         edits = _tap("ok", ud, sent[-1]["code"])
-        assert edits and edits[0].startswith("📝 Saved"), edits
-        assert not _tap("ok", ud, sent[-1]["code"])[0].startswith("📝 Saved"), "the same card worked twice"
+        assert edits and edits[0].startswith("🐘 Saved"), edits
+        assert not _tap("ok", ud, sent[-1]["code"])[0].startswith("🐘 Saved"), "the same card worked twice"
         assert "Buy a USB-C SSD" in actions.NOTES.read_text()
 
     @test("tapping the same card twice doesn't crash")
@@ -1978,7 +2027,7 @@ if bot:
         upd = _Obj(effective_user=_Obj(id=4242), effective_chat=_Obj(id=1),
                    message=_Msg("/note Pick up   the dry-cleaning", sent))
         asyncio.run(bot.cmd_note(upd, _Obj(args=["Pick", "up", "the", "dry-cleaning"])))
-        assert sent[-1]["text"].startswith("📝 Saved"), sent
+        assert sent[-1]["text"].startswith("🐘 Saved"), sent
         assert "Pick up   the dry-cleaning" in actions.NOTES.read_text()
 
     @test("a finished research brief makes the next write ask first")

@@ -43,7 +43,7 @@ digest_lock = asyncio.Lock()       # one Elephant job at a time
 research_lock = asyncio.Lock()
 state = {"now": "idle", "last_digest": None, "notified": set(), "last_backup_try": 0.0, "last_review_sync": 0.0}
 REVIEW_SYNC_EVERY = 300            # seconds between reading your reviews back from the vault
-BUSY = "🐘 The Elephant is digesting, so replies may be slow."
+BUSY = "🐘 The Elephant is digesting, so replies may be a little slow."
 
 COMMANDS_MENU = [                  # what Telegram shows when you type /
     ("research", "Research a topic; the brief and cards land in your vault"),
@@ -126,7 +126,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 @owner_only
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not shiba.message_allowed():
-        await update.message.reply_text("🐕 Slow down a little: too many messages this minute.")
+        await update.message.reply_text("🐕 Easy there: a few too many messages this minute. Give it a moment.")
         return
     await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
     r = await conversation.handle(update.message.text, busy=BUSY if digest_lock.locked() else None)
@@ -190,14 +190,14 @@ cmd_resume = _command(lambda _: shiba.resume())
 @owner_only
 async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = conversation.research(_arg(update, ctx))
-    await update.message.reply_text(msg + ("\n" + now_line() if msg.startswith("🕷️") else ""))
+    await update.message.reply_text(msg + ("\n" + now_line() if msg.startswith("🦞 On it") else ""))
 
 
 @owner_only
 async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     url = _arg(update, ctx)
     if url and not shiba.paused():
-        await update.message.reply_text("📥 Fetching...")
+        await update.message.reply_text("🕷️ Fetching…")
     await update.message.reply_text(await asyncio.to_thread(conversation.save_link, url))
 
 
@@ -265,9 +265,9 @@ async def run_backup() -> str:
         r = await asyncio.to_thread(memory.backup)
     except Exception as e:
         shiba.audit("backup_failed", error=f"{type(e).__name__}: {e}")
-        return f"❌ Backup failed: {e}"
+        return f"🐘 Backup failed: {e}"
     shiba.audit("backup", file=r["file"], facts=r["facts"])
-    return f"💾 Backed up {r['facts']} facts to {r['file']}."
+    return f"🐘 Backed up {r['facts']} facts to {r['file']}."
 
 
 async def run_digest(bot=None, background: bool = False) -> str:
@@ -321,15 +321,15 @@ async def run_research_jobs(app) -> None:
                     state["now"] = "idle"
             if r["status"] == "offline":
                 await notify_once(app.bot, ("net", job["id"]),
-                                  f"📴 Offline. Research #{job['id']} stays queued until I'm back online.")
+                                  f"🦞 We're offline, so research #{job['id']} waits here until we're back.")
                 return
             if r["status"] == "paused":
                 return
             if r["status"] == "stopped":
-                await send(config.ALLOWED_USER_ID, f"⏹️ Research #{job['id']} stopped; what was read is kept.")
+                await send(config.ALLOWED_USER_ID, f"🦞 Research #{job['id']} stopped; what was read is kept.")
                 continue
             if r["status"] == "nothing":
-                await send(config.ALLOWED_USER_ID, f"🔎 Research #{job['id']}: nothing found. "
+                await send(config.ALLOWED_USER_ID, f"🕷️ Research #{job['id']}: came back empty-handed. "
                            + "; ".join(r.get("failed", [])[:3]))
                 continue
             if r.get("suspicious"):

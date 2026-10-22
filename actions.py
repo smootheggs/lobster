@@ -43,7 +43,7 @@ def research_topic(text: str) -> str:
     if not text.strip():
         return "What should I research?"
     job_id = research.enqueue(text.strip())
-    return f"🕷️ Research #{job_id} queued. The brief arrives here in a few minutes; /stop cancels it."
+    return f"🦞 On it. Research #{job_id} queued; the brief lands here in a few minutes. /stop cancels it."
 
 
 ACTIONS = {
@@ -60,5 +60,5 @@ def run_action(name: str, text: str) -> str:
     if spec is None:
         return "That action isn't allowed."
     if shiba.paused() and spec["tier"] != "read":        # second gate, on purpose
-        return "⏸️ Sloth Lobster is paused. Nothing was changed."
+        return "🐕 Sloth Lobster is paused, so nothing was changed. /resume when you're ready."
     return spec["fn"](text) if spec["fn"] else ""

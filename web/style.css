@@ -258,3 +258,13 @@ a:hover { text-decoration: underline; }
 .login input:focus { border-color: var(--line-strong); }
 .login .btn { min-height: 46px; }
 .error { color: var(--coral); min-height: 1.4em; margin: 0; font-size: .9rem; }
+
+/* Can't-reach bar and the update toast */
+.reach-slot:empty { display: none; }
+.reach { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 var(--gutter) 8px;
+  padding: 8px 12px; border: 1px solid var(--amber-line); border-radius: var(--r-card); color: var(--muted); font-size: .88rem; }
+.reach span { flex: 1 1 100%; }
+@media (min-width: 600px) { .reach span { flex: 1 1 auto; } }
+.toast { position: fixed; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--raised);
+  border: 1px solid var(--line, #2a2a2a); border-radius: var(--r-card); font-size: .9rem; z-index: 50; max-width: calc(100vw - 32px); }

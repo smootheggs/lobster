@@ -140,7 +140,7 @@ def run_job(job: dict, say=lambda text: None, progress=None) -> dict:
             p = plan(q)
         if STOP.is_set():
             return {"status": "stopped"}
-        say(f"🕷️ Searching: {', '.join(p['searches'])}")
+        say(f"🕷️ Out collecting: {', '.join(p['searches'])}")
         with timed("collect"):
             got = spider.wikipedia(p["searches"], MAX_CANDIDATES, should_stop=STOP.is_set)
             kept, skipped = elephant.rank(q, got["articles"])
@@ -167,7 +167,7 @@ def run_job(job: dict, say=lambda text: None, progress=None) -> dict:
             mark_done(job["id"], "nothing found")
             return {"status": "nothing", "failed": got["failed"]}
         skipped_note = f" Skipped as off-topic: {', '.join(a['title'] for a in skipped)}." if skipped else ""
-        say(f"📚 Kept {len(urls)} article{'s' if len(urls) != 1 else ''}.{skipped_note} Reading them now.")
+        say(f"🕷️ Back with {len(urls)} article{'s' if len(urls) != 1 else ''}.{skipped_note} Handing them to the Elephant.")
         r = elephant.digest(job=job["id"], progress=progress, should_stop=STOP.is_set, unload=False)
         if r["stopped"] or STOP.is_set():
             return {"status": "stopped", "facts": r["facts"]}

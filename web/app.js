@@ -172,6 +172,7 @@ async function refreshStatus() {
   try {
     S.status = await api("/api/status");
     S.unreachable = false;
+    rememberDoors(S.status.doors);
     if (S.watching.size) await refreshJobs();
     flushOutbox();
   } catch (e) {
@@ -327,7 +328,7 @@ const submit = guard(async (raw) => {
     } else {
       S.thread.push({ t: "lob", text: r.reply || "Done.", kind: /Shiba blocked|paused/.test(r.reply || "") ? "blocked" : "" });
     }
-    const job = (r.reply || "").match(/Research #(\d+) queued/);
+    const job = (r.reply || "").match(/Research #(\d+)(?: is)? queued/);
     if (job) watch(Number(job[1]));
   } finally {
     S.busySending = false;
@@ -408,6 +409,7 @@ async function statusSheet() {
           say((await api(s.paused ? "/api/resume" : "/api/pause", {})).reply);
           closeSheet(); refreshStatus();
         }) }, s.paused ? "Resume" : "Pause all writes"),
+        h("button", { class: "btn", onclick: () => location.reload() }, "Refresh"),
         h("button", { class: "btn", onclick: guard(async () => {
           await api("/api/logout_all", {});
           showLogin();
@@ -527,8 +529,46 @@ async function paintSheets() {
   }
 }
 
+// --- Reaching the tablet: remembered doors, "Try now", hand-off between apps ------------------------
+// The addresses come only from the tablet's own status answer, and links only ever point at
+// private addresses on Sloth Lobster's port, so this bar can't send you anywhere else.
+const DOORS_KEY = "sloth-lobster-doors";
+const PRIVATE = /^https:\/\/(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)[\d.]+:\d+$/;
+
+function rememberDoors(doors) {
+  // Merge, one address per kind: the hotspot door is remembered even while it's shut.
+  const byKind = {};
+  try { for (const d of JSON.parse(localStorage.getItem(DOORS_KEY) || "[]")) if (PRIVATE.test(d.url || "")) byKind[d.kind] = d; }
+  catch { /* start fresh */ }
+  for (const d of doors || []) if (PRIVATE.test(d.url || "")) byKind[String(d.kind).slice(0, 20)] = { url: d.url, kind: String(d.kind).slice(0, 20) };
+  try { localStorage.setItem(DOORS_KEY, JSON.stringify(Object.values(byKind).slice(0, 6))); } catch { /* fine */ }
+}
+
+function otherDoors() {
+  let doors = [];
+  try { doors = JSON.parse(localStorage.getItem(DOORS_KEY) || "[]"); } catch { doors = []; }
+  const onTablet = /^127\./.test(location.hostname);
+  return (Array.isArray(doors) ? doors : []).filter((d) => PRIVATE.test(d.url || "") && d.url !== location.origin
+    && (onTablet || !/^https:\/\/127\./.test(d.url)));
+}
+
+function reachBar() {
+  if (!S.unreachable) return null;
+  const tryNow = h("button", { class: "btn small", onclick: async () => {
+    tryNow.disabled = true;
+    await refreshStatus();
+    if (S.unreachable) tryNow.disabled = false;
+  } }, "Try now");
+  return h("div", { class: "reach", role: "status" },
+    h("span", {}, "🦞 Can't reach the tablet."), tryNow,
+    ...otherDoors().map((d) => h("a", { class: "btn small", href: d.url },
+      d.kind === "Wi-Fi" ? "Try hotspot" : d.kind === "Tailscale" ? "Try Tailscale" : `Try ${d.kind}`)));
+}
+
 // --- Shell -------------------------------------------------------------------------------------------
 function paintChrome() {
+  const reach = document.querySelector(".reach-slot");
+  if (reach) reach.replaceChildren(...[reachBar()].filter(Boolean));
   const side = document.querySelector(".sidebar");
   if (side) side.replaceChildren(navigation());
   const top = document.querySelector(".topbar .dot-btn");
@@ -546,6 +586,7 @@ function renderApp() {
         h("div", { class: "title" }, "Sloth Lobster"),
         h("span", { class: "held-slot" }, heldChip()),
         dotButton()),
+      h("div", { class: "reach-slot" }, reachBar()),
       h("div", { class: "scroll" }, h("div", { class: "thread", id: "thread", "aria-live": "polite" })),
       composer())));
   paintThread();
@@ -593,6 +634,7 @@ async function start() {
     const [{ jobs }, status] = await Promise.all([api("/api/research"), api("/api/status")]);
     S.jobs = jobs;
     S.status = status;
+    rememberDoors(status.doors);
     for (const j of jobs) if (j.status === "waiting") S.watching.add(j.id);
   } catch (e) {
     if (e instanceof LoggedOut) return showLogin();
@@ -617,5 +659,23 @@ async function start() {
   flushOutbox();
 }
 
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+// --- Staying fresh: on return, on reconnect, and after an update ---------------------------------------
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !S.csrf) return;
+  refreshStatus();
+  if (S.swReg) S.swReg.update().catch(() => {});
+});
+
+function updateToast() {
+  if (document.querySelector(".toast")) return;
+  document.body.append(h("div", { class: "toast", role: "status" },
+    h("span", {}, "🦞 A new version is ready."),
+    h("button", { class: "btn small solid", onclick: () => location.reload() }, "Reload")));
+}
+
+if ("serviceWorker" in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) updateToast(); });
+  navigator.serviceWorker.register("/sw.js").then((reg) => { S.swReg = reg; }).catch(() => {});
+}
 start();
