@@ -601,6 +601,7 @@ def _():
     p = research.plan("research English kings")
     assert all("://" not in s and ";" not in s for s in p["searches"]), p
     assert "Norman conquest" in p["searches"], p
+    assert p["searches"][0] == "research English kings", "the question itself must be searched first"
 
 
 @test("a research job fetches only from the fixed provider and digests safely")
@@ -663,6 +664,17 @@ def _():
     assert report["stopped"] and report["pages"] == 1 and report["remaining"] == 2, report
     assert seen == [1], seen
     elephant.digest()
+
+
+@test("a brief draws on every source, not just the first ones")
+def _():
+    urls = [f"https://example.org/spread{n}" for n in range(3)]
+    for n, u in enumerate(urls):
+        memory.add_facts([f"Spread fact number {k} from page {n} about kings of England." for k in range(12)], "web", u)
+    facts = memory.facts_for_sources(urls, limit=40, per_source=8)
+    by = {u: sum(f["source"] == u for f in facts) for u in urls}
+    assert all(c == 8 for c in by.values()), by
+    assert facts[0]["text"].startswith("Spread fact number 0 from page 0"), "opening facts must come first"
 
 
 @test("research waits while paused")

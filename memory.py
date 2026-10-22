@@ -78,16 +78,22 @@ def search(query: str, k: int = 6, min_score: float = 0.45) -> list[dict]:
     ]
 
 
-def facts_for_sources(urls: list[str], limit: int = 40) -> list[dict]:
-    """Web facts that came from these pages, oldest first (used by research briefs)."""
+def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> list[dict]:
+    """Web facts from these pages for a research brief.
+
+    Takes up to per_source facts from each page, earliest first (a Wikipedia
+    article's opening summary comes first), so no single page crowds out the rest.
+    """
     if not urls:
         return []
     con = _db()
-    marks = ",".join("?" * len(urls))
-    rows = con.execute(f"SELECT text, source FROM facts WHERE tag='web' AND source IN ({marks}) "
-                       f"ORDER BY id LIMIT ?", (*urls, limit)).fetchall()
+    out = []
+    for url in dict.fromkeys(urls):
+        rows = con.execute("SELECT text, source FROM facts WHERE tag='web' AND source=? ORDER BY id LIMIT ?",
+                           (url, per_source)).fetchall()
+        out.extend({"text": t, "source": s} for t, s in rows)
     con.close()
-    return [{"text": t, "source": s} for t, s in rows]
+    return out[:limit]
 
 
 def stats() -> dict:
