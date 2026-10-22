@@ -220,12 +220,16 @@ def _job_of(path: Path):
         return None
 
 
-def digest(job: int | None = None) -> dict:
-    """Digest the inbox. With a job id, only that research job's pages."""
+def digest(job: int | None = None, progress=None, should_stop=None) -> dict:
+    """Digest the inbox. With a job id, only that research job's pages.
+
+    progress(i, n, url) is called after each page; should_stop() is checked
+    between pages so a long background digest can make way for research.
+    """
     for d in (INBOX, PROCESSED, FAILED):
         d.mkdir(parents=True, exist_ok=True)
     report = {"pages": 0, "facts": 0, "rejected": 0, "failed": 0, "owner_synced": 0, "suspicious": [],
-              "model_down": False}
+              "model_down": False, "stopped": False, "remaining": 0}
     if not ollama.alive():          # don't burn pages into failed/ while the model is offline
         report["model_down"] = True
         return report
@@ -233,9 +237,15 @@ def digest(job: int | None = None) -> dict:
     paths = sorted(INBOX.glob("*.json"))
     if job is not None:
         paths = [p for p in paths if _job_of(p) == job]
-    for path in paths:
+    for i, path in enumerate(paths, 1):
+        if should_stop is not None and should_stop():
+            report["stopped"] = True
+            report["remaining"] = len(paths) - i + 1
+            break
+        url = ""
         try:
             r = digest_file(path)
+            url = r["url"]
             report["pages"] += 1
             report["facts"] += r["stored"]
             report["rejected"] += r["rejected"]
@@ -245,6 +255,8 @@ def digest(job: int | None = None) -> dict:
         except Exception:
             report["failed"] += 1
             shutil.move(str(path), FAILED / path.name)
+        if progress is not None:
+            progress(i, len(paths), url)
     _archive_old()
     ollama.unload(MODEL)           # feast over: free the RAM
     ollama.unload(EMBED_MODEL)

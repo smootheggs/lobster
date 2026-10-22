@@ -653,6 +653,18 @@ def _():
     (elephant.INBOX / "1-retry.json").rename(elephant.FAILED / "1-retry.json")
 
 
+@test("a background digest makes way for research between pages")
+def _():
+    for n in range(3):
+        spider.to_inbox({"url": f"https://example.org/bg{n}", "content": "England had kings for a thousand years.",
+                         "content_type": "text/plain", "sha256": str(n)}, origin="source")
+    seen = []
+    report = elephant.digest(progress=lambda i, n, u: seen.append(i), should_stop=lambda: len(seen) >= 1)
+    assert report["stopped"] and report["pages"] == 1 and report["remaining"] == 2, report
+    assert seen == [1], seen
+    elephant.digest()
+
+
 @test("research waits while paused")
 def _():
     shiba.pause()
@@ -742,6 +754,15 @@ if bot:
         assert _tap("ok", ud, sent[-1]["code"]) != ["📝 Saved."], "the same card worked twice"
         assert "Buy a USB-C SSD" in actions.NOTES.read_text()
 
+    @test("tapping the same card twice doesn't crash")
+    def _():
+        from telegram.error import BadRequest
+
+        async def same(text):
+            raise BadRequest("Message is not modified: specified new message content is the same")
+        q = _Obj(data="ok:never-issued", answer=_noop, edit_message_text=same)
+        asyncio.run(bot.on_button(_Obj(effective_user=_Obj(id=4242), callback_query=q), _Obj(user_data={})))
+
     @test("without web facts, a write runs straight away")
     def _():
         sent = _say("please save a note", {})
@@ -768,6 +789,8 @@ if bot:
         sent = asyncio.run(scenario())
         assert not any("Already digesting" in m for m in sent), sent
         assert "Augustus" in sent[-1] and "No usable facts" not in sent[-1], sent[-1]
+        assert any("1/1 digested (Augustus)" in m for m in sent), sent
+        assert bot.state["now"] == "idle", bot.state["now"]
 
     @test("confirm-tier actions always ask")
     def _():

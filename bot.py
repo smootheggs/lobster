@@ -16,6 +16,7 @@ import subprocess
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -42,7 +43,18 @@ log = logging.getLogger("lobster")
 TAINT_MEMORY = 6          # after seeing web facts, stay cautious for this many turns
 digest_lock = asyncio.Lock()
 research_lock = asyncio.Lock()
-state = {"last_crawl": 0.0, "last_digest": None, "offline_notified": set()}
+state = {"last_crawl": 0.0, "last_digest": None, "offline_notified": set(), "now": "idle"}
+
+
+def _title(url: str) -> str:
+    from urllib.parse import unquote
+    return unquote(url.rstrip("/").rsplit("/", 1)[-1]).replace("_", " ")[:60] or "page"
+
+
+def now_line() -> str:
+    pending = research.pending()
+    waiting = f" · {len(pending)} research job(s) waiting" if pending else ""
+    return f"⏳ Now: {state['now']}{waiting} · {spider.inbox_count()} pages in the inbox"
 
 
 def allowed(update: Update) -> bool:
@@ -74,6 +86,7 @@ HELP = (
     "/sources, /addsource <url>, /removesource <url>\n"
     "/crawl: run the Spider now · /digest: run the Elephant now · /retryfailed: retry failed pages\n"
     "/pause, /resume: freeze or unfreeze every write\n"
+    "/jobs: what Lobster is doing right now\n"
     "/audit: Shiba's last decisions"
 )
 
@@ -132,10 +145,31 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     result = await asyncio.to_thread(run_action, action, text)
+    if action == "research":
+        result += "\n" + now_line()
     out = "\n\n".join(p for p in (decision["reply"], result) if p) or "🦞"
     # Don't feed raw memory search results back into the model's context.
     history.append({"role": "assistant", "content": decision["reply"] if action == "search_memory" else out})
     await update.message.reply_text(out)
+
+
+async def _edit(query, text: str) -> None:
+    """Edit an approval card; tapping a card twice is harmless, not an error."""
+    try:
+        await query.edit_message_text(text)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """One readable line instead of a traceback. Network blips are routine on a tablet."""
+    err = ctx.error
+    if isinstance(err, NetworkError):
+        log.warning("Telegram network hiccup: %s", err)
+        return
+    log.error("Handler error: %s: %s", type(err).__name__, err)
+    shiba.audit("handler_error", error=f"{type(err).__name__}: {err}")
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -146,14 +180,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     choice, _, code = (query.data or "").partition(":")
     if choice == "no":
         shiba.cancel(code)
-        await query.edit_message_text("Cancelled. Nothing was changed.")
+        await _edit(query, "Cancelled. Nothing was changed.")
         return
     rec, why = shiba.redeem(code) if choice == "ok" else (None, "Unknown button.")
     if rec is None:
-        await query.edit_message_text(why)
+        await _edit(query, why)
         return
     result = await asyncio.to_thread(run_action, rec["action"], rec["text"])
-    await query.edit_message_text(result or "Done.")
+    await _edit(query, result or "Done.")
 
 
 # --- Commands you type yourself (no model involved) ---------------------------
@@ -171,6 +205,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"{len(research.pending())} research jobs queued",
         f"🐕 Shiba: {guard}, {shiba.blocks_last_day()} blocks or rejections in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (install termux-api)'}",
+        now_line(),
         f"Last digest: {state['last_digest'] or 'never'} · version {config.VERSION}",
     ]
     await update.message.reply_text("\n".join(lines))
@@ -216,7 +251,7 @@ async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if verdict == shiba.BLOCK or not question:
             await update.message.reply_text(f"🐕 Not queued: {reason}." if question else "Usage: /research <question>")
             return
-        await update.message.reply_text(run_action("research", question))
+        await update.message.reply_text(run_action("research", question) + "\n" + now_line())
 
 
 async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -227,6 +262,14 @@ async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if allowed(update):
         await update.message.reply_text(shiba.resume())
+
+
+async def cmd_jobs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if allowed(update):
+        lines = [now_line()]
+        for job in research.pending():
+            lines.append(f"🔎 #{job['id']} waiting: {job['question']} (queued {job['ts'][11:]})")
+        await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_audit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -280,22 +323,37 @@ async def run_crawl() -> str:
     return msg + (f", {len(r['failed'])} failed:\n" + "\n".join(r["failed"]) if r["failed"] else "")
 
 
-async def run_digest(bot=None, job: int | None = None) -> str:
-    """Digest the inbox. A research job (job=id) waits its turn instead of being skipped."""
+async def run_digest(bot=None, job: int | None = None, progress=None, background: bool = False) -> str:
+    """Digest the inbox. A research job (job=id) waits its turn instead of being skipped.
+    A background digest stops between pages as soon as a research job is waiting."""
     if shiba.paused():
         return "⏸️ Paused: the Elephant won't store anything until /resume."
     if job is None and digest_lock.locked():
-        return "Already digesting."
+        return "Already digesting. " + now_line()
+    label = f"research #{job}" if job is not None else ("background digest" if background else "digest")
+
+    def track(i, n, url):
+        state["now"] = f"Elephant on {label}, page {i}/{n} done"
+        if progress is not None:
+            progress(i, n, url)
+    stop = (lambda: bool(research.pending())) if background else None
     async with digest_lock:
-        r = await asyncio.to_thread(elephant.digest, job)
+        state["now"] = f"Elephant starting {label}"
+        try:
+            r = await asyncio.to_thread(elephant.digest, job, track, stop)
+        finally:
+            state["now"] = "idle"
     if r["model_down"]:
         return "🧠 The model is offline, so pages stay in the inbox until it's back. Check /status."
     state["last_digest"] = time.strftime("%Y-%m-%d %H:%M")
     if r["suspicious"] and bot is not None:
         await alert(bot, "rejected several instruction-like facts from:\n" + "\n".join(r["suspicious"])
                     + "\nDetails: /audit")
-    return (f"🐘 Digested {r['pages']} pages: {r['facts']} new facts stored, "
-            f"{r['rejected']} rejected by the filter, {r['failed']} pages failed. Model unloaded.")
+    msg = (f"🐘 Digested {r['pages']} pages: {r['facts']} new facts stored, "
+           f"{r['rejected']} rejected by the filter, {r['failed']} pages failed.")
+    if r["stopped"]:
+        msg += f" Paused with {r['remaining']} pages left, to run your research first."
+    return msg
 
 
 async def run_research_jobs(app) -> None:
@@ -311,6 +369,7 @@ async def run_research_jobs(app) -> None:
                     await send(config.ALLOWED_USER_ID, f"🧠 Model offline. Research #{job['id']} waits until it's back.")
                 return
             await send(config.ALLOWED_USER_ID, f"🕷️ Researching #{job['id']}: {job['question']}")
+            state["now"] = f"Spider fetching for research #{job['id']}"
             gathered = await asyncio.to_thread(research.gather, job)
             if gathered["offline"]:
                 if job["id"] not in state["offline_notified"]:
@@ -323,11 +382,18 @@ async def run_research_jobs(app) -> None:
                            + "; ".join(gathered["failed"][:3]))
                 continue
             plan = ", ".join(gathered["plan"]["searches"])
+            loop = asyncio.get_running_loop()
+
+            def report_page(i, n, url, job_id=job["id"]):
+                asyncio.run_coroutine_threadsafe(
+                    send(config.ALLOWED_USER_ID, f"🐘 #{job_id}: {i}/{n} digested ({_title(url)})"), loop)
             await send(config.ALLOWED_USER_ID, f"🔎 Searched: {plan}\n📚 {len(gathered['urls'])} articles fetched. "
                        "Digesting, which takes a few minutes on the tablet...")
-            await send(config.ALLOWED_USER_ID, await run_digest(app.bot, job=job["id"]))
+            await send(config.ALLOWED_USER_ID, await run_digest(app.bot, job=job["id"], progress=report_page))
+            state["now"] = f"writing the brief for research #{job['id']}"
             text = await asyncio.to_thread(research.brief, job, gathered["urls"])
             research.mark_done(job["id"], "done", len(gathered["urls"]))
+            state["now"] = "idle"
             try:                       # the brief is web content: be cautious for the next turns
                 app.user_data[config.ALLOWED_USER_ID]["taint_turns"] = TAINT_MEMORY
             except Exception:
@@ -345,7 +411,9 @@ async def background(app: Application) -> None:
                 log.info(await run_crawl())
             if (config.DIGEST_ON_CHARGE and spider.inbox_count() and not digest_lock.locked()
                     and await asyncio.to_thread(is_charging)):
-                await app.bot.send_message(config.ALLOWED_USER_ID, await run_digest(app.bot))
+                msg = await run_digest(app.bot, background=True)
+                if not msg.startswith("🐘 Digested 0 pages"):
+                    await app.bot.send_message(config.ALLOWED_USER_ID, msg)
         except Exception:
             log.exception("Background loop error")
         await asyncio.sleep(30)
@@ -370,9 +438,10 @@ def main() -> None:
     for name, fn in [("status", cmd_status), ("sources", cmd_sources), ("addsource", cmd_addsource),
                      ("removesource", cmd_removesource), ("save", cmd_save), ("research", cmd_research),
                      ("pause", cmd_pause), ("resume", cmd_resume), ("audit", cmd_audit),
-                     ("crawl", cmd_crawl), ("digest", cmd_digest), ("retryfailed", cmd_retryfailed)]:
+                     ("crawl", cmd_crawl), ("digest", cmd_digest), ("retryfailed", cmd_retryfailed), ("jobs", cmd_jobs)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_error_handler(on_error)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     shiba.audit("started", model=config.MODEL)
     log.info("Lobster %s starting (model=%s, proxy=%s)", config.VERSION, config.MODEL, config.PROXY or "none")
