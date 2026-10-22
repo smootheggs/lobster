@@ -842,6 +842,48 @@ def _():
                                                       "beginning with Henry II, until the death of Richard III in 1485."))
 
 
+@test("titles end where a phrase ends (real cases from the tablet)")
+def _():
+    cases = {
+        "The Hanseatic League expanded from Lübeck to nearly 200 settlements across eight modern-day countries.":
+            "The Hanseatic League expanded from Lübeck to nearly 200 settlements",
+        "The New Hanseatic League was established in February 2018 by eight European finance ministers to coordinate.":
+            "The New Hanseatic League was established in February 2018",
+        "Cogs were the most emblematic vessel type used by the Hanseatic League.":
+            "Cogs were the most emblematic vessel type used by the Hanseatic League",
+    }
+    for sentence, want in cases.items():
+        got = elephant.short_claim(sentence)
+        assert got == want, (got, want)
+        assert len(got) <= vault.TITLE_LIMIT and not elephant._dangles(got)
+    fact = {"text": next(iter(cases)), "sentence": ""}
+    cut = "The Hanseatic League expanded from Lübeck to nearly 200 settlements across"   # what Qwen sent
+    assert elephant._claim(cut, fact) == cases[fact["text"]], "a title cut mid-phrase was kept"
+    f3 = {"text": list(cases)[1], "sentence": ""}
+    assert elephant._claim("The New Hanseatic League was established in February 2018 by eight European", f3) == \
+        cases[f3["text"]], "a title cut off after an adjective was kept"
+    f2 = {"text": "Henry VIII was King of England from 1509 until his death in 1547, and broke with Rome.", "sentence": ""}
+    assert elephant._claim("Henry VIII was King of England from 1509 until his death in 1547", f2).endswith("1547"), \
+        "a clean cut at a comma should be kept"
+    assert elephant._claim("Henry VIII ruled England from 1509 to 1547", f2) == "Henry VIII ruled England from 1509 to 1547"
+
+
+@test("a brief lists and files only the sources it cites")
+def _():
+    research.enqueue("Wars of the Roses and the Tudors")
+    job = research.pending()[-1]
+    r = research.run_job(job)
+    assert r["status"] == "done", r
+    text = r["brief"]
+    cited = set(re.findall(r"\[(\d+)\]$", text, re.M))
+    listed = set(re.findall(r"^\[(\d+)\] https://", text, re.M))
+    assert listed and listed == cited, (listed, cited, text)
+    maps = [c for c in memory.cards("map") if c["job"] == job["id"]]
+    srcs = vault.read_frontmatter(vault.VAULT_DIR / maps[0]["path"])
+    body = (vault.VAULT_DIR / maps[0]["path"]).read_text(encoding="utf-8")
+    assert body.count("(Wikipedia)]]") == len(listed), body
+
+
 @test("research works with the chat model down")
 def _():
     real = ollama.chat

@@ -347,34 +347,71 @@ BRIEF_SCHEMA = {
 }
 
 
-DANGLING = {"a", "an", "the", "of", "in", "on", "at", "to", "from", "by", "for", "with", "and", "or", "but",
-            "who", "which", "that", "after", "before", "during", "as", "his", "her", "its", "their", "beginning",
-            "until", "than", "into", "between", "was", "were", "is", "are"}
+# Words a title must not end on: a phrase cut before them still reads as a complete claim.
+FUNCTION_WORDS = {
+    "a", "an", "the", "of", "in", "on", "at", "to", "from", "by", "for", "with", "and", "or", "but", "nor",
+    "who", "which", "that", "whose", "whom", "where", "when", "while", "after", "before", "during", "as",
+    "his", "her", "its", "their", "until", "than", "into", "between", "across", "over", "under", "through",
+    "among", "against", "about", "around", "within", "without", "via", "per", "toward", "towards", "upon",
+    "onto", "near", "like", "since", "because", "although", "though", "if", "including", "such", "both",
+    "either", "neither", "also", "was", "were", "is", "are", "be", "been", "being", "had", "has", "have"}
+TOKEN = re.compile(r"[\w'’-]+")
 
 
 def _dangles(t: str) -> bool:
     words = t.rstrip(" ,;:").split()
-    return bool(words) and words[-1].lower() in DANGLING
+    return bool(words) and words[-1].lower() in FUNCTION_WORDS
+
+
+def _tokens(t: str) -> list[str]:
+    return [w.lower() for w in TOKEN.findall(t)]
 
 
 def short_claim(text: str, limit: int = vault.TITLE_LIMIT) -> str:
-    """A sentence trimmed to a title: its first clause if it's long, never ending mid-phrase."""
+    """A sentence trimmed to a title that still reads as a whole claim.
+
+    Short enough: the sentence itself. Otherwise its first clause, if that fits; otherwise cut just
+    before the last joining word that fits ("across", "by", "which"...), so the title ends where a
+    phrase ends: "…expanded to nearly 200 settlements", not "…200 settlements across".
+    """
     t = " ".join(text.split()).rstrip(".")
-    if len(t) <= limit:
+    if len(t) <= limit and not _dangles(t):
         return t
-    cut = re.split(r"[,;:(]| - | – ", t)[0].strip()
-    if not 20 <= len(cut) <= limit:
-        cut = t[:limit].rsplit(" ", 1)[0]
+    clause = re.split(r"[,;:(]| - | – ", t)[0].strip()
+    if 25 <= len(clause) <= limit and not _dangles(clause):
+        return clause
+    words = t[:limit + 1].split()
+    if len(t) > limit:
+        words = words[:-1]                      # the last word may be cut in half
+    for i in range(len(words) - 1, 3, -1):
+        if words[i].lower().strip(",;:") in FUNCTION_WORDS:
+            cut = " ".join(words[:i]).rstrip(" ,;:")
+            if len(cut) >= 25 and not _dangles(cut):
+                return cut
+    cut = " ".join(words).rstrip(" ,;:")
     while _dangles(cut) and " " in cut:
         cut = cut.rsplit(" ", 1)[0].rstrip(" ,;:")
     return cut
 
 
+def _truncated(claim: str, sentence: str) -> bool:
+    """True if the claim is just the start of the source sentence, cut off mid-phrase."""
+    c, s = _tokens(claim), _tokens(sentence)
+    if not c or len(c) >= len(s) or s[:len(c)] != c:
+        return False
+    # Accept a cut where the sentence itself pauses (a comma, semicolon...) right after it.
+    last = TOKEN.findall(claim)[-1]
+    at = sentence.lower().find(last.lower(), len(" ".join(TOKEN.findall(claim)[:-1])))
+    after = sentence[at + len(last):at + len(last) + 2] if at >= 0 else ""
+    return not re.match(r"\s*[,;:(]", after)
+
+
 def _claim(raw, fact: dict) -> str:
-    """The model's title if it is faithful to the source sentence; otherwise the sentence itself."""
+    """The model's title if it is a faithful, complete phrase; otherwise one cut cleanly from the source."""
     claim = " ".join(shiba.strip_links(raw if isinstance(raw, str) else "").split()).rstrip(".")
     claim = re.sub(r"^(\[\d+\]\s*)+|(\s*\[\d+\])+$", "", claim).strip()
-    if (not 10 <= len(claim) <= vault.TITLE_LIMIT or _dangles(claim) or shiba.fact_problem(claim + " (claim)")
+    if (not 10 <= len(claim) <= vault.TITLE_LIMIT or _dangles(claim) or _truncated(claim, fact["text"])
+            or shiba.fact_problem(claim + " (claim)")
             or shiba.grounding_problem(claim, fact["text"], fact["sentence"] or fact["text"])):
         return short_claim(fact["text"])
     return claim
@@ -448,7 +485,9 @@ def brief(job: dict, urls: list[str]) -> dict:
         if not facts:
             return {"text": f"{head}\n\nNo usable facts came back. Try a narrower question.", "topic": "", "cards": 0}
         topic, points = choose_points(job["question"], facts)
-        numbers = {u: n for n, u in enumerate(dict.fromkeys(f["source"] for f in facts), 1)}
+        # Only the sources the brief actually cites are listed and filed; every page read is
+        # still in memory for /ask.
+        numbers = {u: n for n, u in enumerate(dict.fromkeys(facts[i]["source"] for i, _ in points), 1)}
         bullets = [f"- {claim} [{numbers[facts[i]['source']]}]" for i, claim in points]
         filed = ""
         try:
@@ -458,7 +497,9 @@ def brief(job: dict, urls: list[str]) -> dict:
             shiba.audit("vault_write_failed", job=job["id"], error=f"{type(e).__name__}: {e}")
             filed = "\n\n(Couldn't write to the vault this time; the facts are saved in memory.)"
         sources = "\n".join(f"[{n}] {u}" for u, n in numbers.items())
-        text = (f"{head}\n\n" + "\n".join(bullets) + f"\n\nSources:\n{sources}{filed}"
+        unread = len(urls) - len(numbers)
+        also = f"\n(+{unread} more article{'s' if unread != 1 else ''} read; their facts are in memory for /ask)" if unread > 0 else ""
+        text = (f"{head}\n\n" + "\n".join(bullets) + f"\n\nSources:\n{sources}{also}{filed}"
                 "\n\n🌐 Web facts: treat as untrusted until reviewed.")
     return {"text": text, "topic": topic, "cards": len(points)}
 
