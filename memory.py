@@ -1,31 +1,35 @@
-"""The Elephant's vault: facts with receipts in SQLite.
+"""🐘 The Elephant's index: facts with receipts, and the cards made from them, in SQLite.
 
 Every fact carries a `tag`:
-  "owner" -> came from you (MEMORY.md or the remember action). Trusted.
-  "web"   -> extracted from a web page by the Elephant. Untrusted data.
+  "owner" -> came from you (a note, MEMORY.md). Trusted.
+  "web"   -> collected from a web page. Untrusted data.
 
-Web facts also keep their receipt: the source URL, the exact sentence they
-came from, when they were fetched and published, whether they are a plain
-fact or a reported claim ("X said..."), and a review status.
+Web facts are the source's own sentences (never a model's rewording), with the
+surrounding sentences as their receipt, plus when they were fetched, which
+research job found them, and a review `status`:
+  unreviewed -> new · verified -> you checked it · wrong -> you marked it wrong (never used again, never deleted)
 
-Search uses embeddings (numpy, no vector server) when the embedding model is
-available, and SQLite full-text search otherwise, so it never goes blind.
+The `cards` table remembers every note the Elephant wrote into your vault, so
+your reviews in Obsidian or the app flow back here.
 
-Schema changes only ever ADD columns or tables; nothing is dropped.
+Search ranks by meaning (embeddings, held in memory and loaded incrementally)
+and falls back to SQLite full-text search when the embedding model is away.
+Schema changes only ever ADD columns, tables or indexes; nothing is dropped.
 """
 import hashlib
 import re
 import sqlite3
+import threading
 import time
-from pathlib import Path
 
 import numpy as np
 
 import ollama
 from config import BACKUP_DIR, DB_PATH, EMBED_MODEL, MEMORY_MD
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 KEEP_BACKUPS = 14
+STATUSES = ("unreviewed", "verified", "wrong")
 
 BASE = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -41,13 +45,28 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 """
 V2_COLUMNS = {                         # name -> definition, added in version 2
-    "sentence": "TEXT NOT NULL DEFAULT ''",
+    "sentence": "TEXT NOT NULL DEFAULT ''",          # the receipt: the sentence and its neighbours
     "fetched_at": "TEXT NOT NULL DEFAULT ''",
     "published_at": "TEXT NOT NULL DEFAULT ''",
     "kind": "TEXT NOT NULL DEFAULT 'fact'",          # fact | reported_claim
-    "status": "TEXT NOT NULL DEFAULT 'unreviewed'",  # unreviewed | verified | conflict | stale
+    "status": "TEXT NOT NULL DEFAULT 'unreviewed'",  # unreviewed | verified | wrong
     "job": "INTEGER",
 }
+V3 = """
+CREATE TABLE IF NOT EXISTS cards (
+    id       TEXT PRIMARY KEY,        -- stable: survives renaming or moving the file
+    kind     TEXT NOT NULL,           -- card | note | source | map
+    fact_id  INTEGER,
+    title    TEXT NOT NULL,
+    path     TEXT NOT NULL,           -- relative to the vault
+    job      INTEGER,
+    created  TEXT NOT NULL,
+    status   TEXT NOT NULL DEFAULT 'unreviewed'
+);
+CREATE INDEX IF NOT EXISTS facts_source ON facts(source);
+CREATE INDEX IF NOT EXISTS facts_job ON facts(job);
+CREATE INDEX IF NOT EXISTS cards_kind ON cards(kind, created);
+"""
 REPORTED = re.compile(r"\b(said|says|according to|claimed|claims|reported|announced|"
                       r"expects?|plans? to|alleged|believes?)\b", re.I)
 
@@ -65,6 +84,7 @@ def _migrate(con: sqlite3.Connection) -> None:
         for name, definition in V2_COLUMNS.items():
             if name not in have:
                 con.execute(f"ALTER TABLE facts ADD COLUMN {name} {definition}")
+        con.executescript(V3)
         try:                                     # full-text search, if this SQLite has FTS5
             if not _has_fts(con):
                 con.execute("CREATE VIRTUAL TABLE facts_fts USING fts5(text)")
@@ -77,7 +97,7 @@ def _migrate(con: sqlite3.Connection) -> None:
 
 def _db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=30)
     con.execute("PRAGMA journal_mode=WAL")  # safer if the tablet dies mid-write
     if str(DB_PATH) not in _ready:
         _migrate(con)
@@ -95,10 +115,11 @@ def kind_of(text: str) -> str:
 
 
 def add_facts(items: list, tag: str, source: str, page: dict | None = None) -> int:
-    """Embed and store new facts. Returns how many were actually new.
+    """Store new facts. Returns how many were actually new.
 
-    items: plain strings, or dicts {"text": ..., "sentence": ...} carrying the receipt.
-    page:  optional metadata from the Spider (fetched_at, published_at, job).
+    items: plain strings, or dicts {"text", "sentence", optional "embedding"} (the Elephant
+           passes the embedding it already computed, so nothing is embedded twice).
+    page:  optional metadata (fetched_at, published_at, job).
     """
     page = page or {}
     rows = [i if isinstance(i, dict) else {"text": i, "sentence": ""} for i in items]
@@ -113,18 +134,22 @@ def add_facts(items: list, tag: str, source: str, page: dict | None = None) -> i
     if not new:
         con.close()
         return 0
-    try:
-        vectors = ollama.embed(EMBED_MODEL, [r["text"] for r in new])
-    except Exception:                    # embedding model missing: keyword search still works
-        vectors = [[] for _ in new]
+    missing = [r for r in new if r.get("embedding") is None]
+    if missing:
+        try:
+            for r, v in zip(missing, ollama.embed(EMBED_MODEL, [r["text"] for r in missing])):
+                r["embedding"] = v
+        except Exception:                # embedding model away: keyword search still works
+            pass
     now = time.strftime("%Y-%m-%d %H:%M")
     fts = _has_fts(con)
     with con:
-        for r, v in zip(new, vectors):
+        for r in new:
             cur = con.execute(
                 "INSERT OR IGNORE INTO facts (text, tag, source, added, text_hash, embedding, sentence, "
                 "fetched_at, published_at, kind, job) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (r["text"], tag, source, now, _hash(r["text"]), np.asarray(v, dtype=np.float32).tobytes(),
+                (r["text"], tag, source, now, _hash(r["text"]),
+                 np.asarray(r.get("embedding") or [], dtype=np.float32).tobytes(),
                  r.get("sentence", ""), page.get("fetched_at", ""), page.get("published_at", ""),
                  kind_of(r["text"]) if tag == "web" else "fact", page.get("job")))
             if fts and cur.rowcount:
@@ -133,12 +158,58 @@ def add_facts(items: list, tag: str, source: str, page: dict | None = None) -> i
     return len(new)
 
 
+# --- Search ---------------------------------------------------------------------
+
+class _Vectors:
+    """All fact embeddings, normalised, held in memory (half precision) and topped up
+    with only the new rows on each search. Fast up to tens of thousands of facts."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.db, self.max_id, self.dim = "", 0, 0
+        self.ids = np.zeros(0, dtype=np.int64)
+        self.mat = np.zeros((0, 0), dtype=np.float16)
+
+    def load(self, con) -> None:
+        if self.db != str(DB_PATH):
+            self.reset()
+            self.db = str(DB_PATH)
+        rows = con.execute("SELECT id, embedding FROM facts WHERE id > ? AND length(embedding) > 0 ORDER BY id",
+                           (self.max_id,)).fetchall()
+        if not rows:
+            return
+        vecs, ids = [], []
+        for fid, blob in rows:
+            v = np.frombuffer(blob, dtype=np.float32)
+            if self.dim == 0:
+                self.dim = len(v)
+            if len(v) == self.dim:            # embedding model changed: don't mix vectors
+                n = np.linalg.norm(v)
+                vecs.append(v / n if n else v)
+                ids.append(fid)
+        self.max_id = rows[-1][0]
+        if vecs:
+            new = np.stack(vecs).astype(np.float16)
+            self.mat = new if self.mat.size == 0 else np.vstack([self.mat, new])
+            self.ids = np.concatenate([self.ids, np.asarray(ids, dtype=np.int64)])
+
+
+_vectors = _Vectors()
+
+
 def _row(r, score) -> dict:
-    return {"text": r[0], "tag": r[1], "source": r[2], "added": r[3], "score": round(float(score), 3)}
+    return {"id": r[0], "text": r[1], "tag": r[2], "source": r[3], "added": r[4], "status": r[5],
+            "sentence": r[6], "score": round(float(score), 3)}
+
+
+_COLS = "f.id, f.text, f.tag, f.source, f.added, f.status, f.sentence"
 
 
 def keyword_search(query: str, k: int = 6) -> list[dict]:
-    """Full-text search; works without any model."""
+    """Full-text search; works without any model. Facts marked wrong are skipped."""
     words = re.findall(r"\w{3,}", query.lower())
     if not words:
         return []
@@ -147,46 +218,56 @@ def keyword_search(query: str, k: int = 6) -> list[dict]:
         if not _has_fts(con):
             return []
         rows = con.execute(
-            "SELECT f.text, f.tag, f.source, f.added FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid "
-            "WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?", (" OR ".join(words), k)).fetchall()
+            f"SELECT {_COLS} FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid "
+            "WHERE facts_fts MATCH ? AND f.status != 'wrong' ORDER BY rank LIMIT ?",
+            (" OR ".join(f'"{w}"' for w in words), k)).fetchall()
     finally:
         con.close()
     return [_row(r, 1.0) for r in rows]
 
 
 def search(query: str, k: int = 6, min_score: float = 0.45) -> list[dict]:
-    """Meaning-based search with embeddings; falls back to keywords if the model is unavailable."""
+    """Meaning-based search; falls back to keywords if the embedding model is unavailable.
+    Verified facts get a small boost; facts you marked wrong never come back."""
     con = _db()
-    rows = con.execute("SELECT text, tag, source, added, embedding FROM facts WHERE length(embedding) > 0").fetchall()
-    con.close()
-    if not rows:
-        return keyword_search(query, k)
     try:
-        q = np.asarray(ollama.embed(EMBED_MODEL, [query])[0], dtype=np.float32)
-    except Exception:
-        return keyword_search(query, k)
-    mat = np.stack([np.frombuffer(r[4], dtype=np.float32) for r in rows])
-    if mat.shape[1] != q.shape[0]:            # embedding model changed: don't mix vectors
-        return keyword_search(query, k)
-    scores = mat @ q / (np.linalg.norm(mat, axis=1) * np.linalg.norm(q) + 1e-9)
-    best = np.argsort(-scores)[:k]
-    return [_row(rows[i], scores[i]) for i in best if scores[i] >= min_score]
+        with _vectors.lock:
+            _vectors.load(con)
+            ids, mat, dim = _vectors.ids, _vectors.mat, _vectors.dim
+        if not len(ids):
+            return keyword_search(query, k)
+        try:
+            q = np.asarray(ollama.embed(EMBED_MODEL, [query])[0], dtype=np.float32)
+        except Exception:
+            return keyword_search(query, k)
+        if q.shape[0] != dim:
+            return keyword_search(query, k)
+        q = q / (np.linalg.norm(q) + 1e-9)
+        scores = mat.astype(np.float32) @ q
+        top = np.argsort(-scores)[: k * 4]
+        wanted = {int(ids[i]): float(scores[i]) for i in top if scores[i] >= min_score}
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        rows = con.execute(f"SELECT {_COLS} FROM facts f WHERE f.id IN ({marks}) AND f.status != 'wrong'",
+                           list(wanted)).fetchall()
+    finally:
+        con.close()
+    hits = [_row(r, wanted[r[0]] + (0.05 if r[5] == "verified" else 0.0)) for r in rows]
+    return sorted(hits, key=lambda h: -h["score"])[:k]
 
 
 def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> list[dict]:
-    """Web facts from these pages for a research brief.
-
-    Takes up to per_source facts from each page, earliest first (a Wikipedia
-    article's opening summary comes first), so no single page crowds out the rest.
-    """
+    """Web facts from these pages for a research brief: up to per_source from each page,
+    in page order (an article's opening comes first), so no single page crowds out the rest."""
     if not urls:
         return []
     con = _db()
     out = []
     for url in dict.fromkeys(urls):
-        rows = con.execute("SELECT text, source FROM facts WHERE tag='web' AND source=? ORDER BY id LIMIT ?",
-                           (url, per_source)).fetchall()
-        out.extend({"text": t, "source": s} for t, s in rows)
+        rows = con.execute("SELECT id, text, source, sentence FROM facts WHERE tag='web' AND source=? "
+                           "AND status != 'wrong' ORDER BY id LIMIT ?", (url, per_source)).fetchall()
+        out.extend({"id": i, "text": t, "source": s, "sentence": w} for i, t, s, w in rows)
     con.close()
     return out[:limit]
 
@@ -194,8 +275,58 @@ def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> 
 def stats() -> dict:
     con = _db()
     counts = dict(con.execute("SELECT tag, COUNT(*) FROM facts GROUP BY tag").fetchall())
+    cards = dict(con.execute("SELECT status, COUNT(*) FROM cards WHERE kind='card' GROUP BY status").fetchall())
     con.close()
-    return {"owner": counts.get("owner", 0), "web": counts.get("web", 0)}
+    return {"owner": counts.get("owner", 0), "web": counts.get("web", 0),
+            "cards": sum(cards.values()), "unreviewed": cards.get("unreviewed", 0)}
+
+
+# --- Cards: what the Elephant wrote into your vault ---------------------------------
+
+def add_card(card_id: str, kind: str, title: str, path: str, fact_id: int | None = None,
+             job: int | None = None) -> None:
+    con = _db()
+    with con:
+        con.execute("INSERT OR IGNORE INTO cards (id, kind, fact_id, title, path, job, created) "
+                    "VALUES (?,?,?,?,?,?,?)", (card_id, kind, fact_id, title, path, job, time.strftime("%Y-%m-%d %H:%M")))
+    con.close()
+
+
+def cards(kind: str = "card", status: str | None = None, job: int | None = None, limit: int = 50) -> list[dict]:
+    sql = ("SELECT c.id, c.kind, c.title, c.path, c.job, c.created, c.status, f.text, f.source "
+           "FROM cards c LEFT JOIN facts f ON f.id = c.fact_id WHERE c.kind = ?")
+    args: list = [kind]
+    if status:
+        sql += " AND c.status = ?"
+        args.append(status)
+    if job is not None:
+        sql += " AND c.job = ?"
+        args.append(job)
+    con = _db()
+    rows = con.execute(sql + " ORDER BY c.rowid DESC LIMIT ?", args + [limit]).fetchall()
+    con.close()
+    keys = ("id", "kind", "title", "path", "job", "created", "status", "text", "source")
+    return [dict(zip(keys, r)) for r in rows]
+
+
+def card(card_id: str) -> dict | None:
+    con = _db()
+    r = con.execute("SELECT id, kind, title, path, fact_id, status FROM cards WHERE id=?", (card_id,)).fetchone()
+    con.close()
+    return dict(zip(("id", "kind", "title", "path", "fact_id", "status"), r)) if r else None
+
+
+def set_status(card_id: str, status: str, path: str | None = None) -> bool:
+    """Record a review. The card's fact follows it: wrong facts are never used again."""
+    if status not in STATUSES:
+        return False
+    con = _db()
+    with con:
+        cur = con.execute("UPDATE cards SET status=?" + (", path=?" if path else "") + " WHERE id=?",
+                          (status, path, card_id) if path else (status, card_id))
+        con.execute("UPDATE facts SET status=? WHERE id=(SELECT fact_id FROM cards WHERE id=?)", (status, card_id))
+    con.close()
+    return cur.rowcount > 0
 
 
 # --- Backups -----------------------------------------------------------------------
@@ -204,7 +335,7 @@ def backup() -> dict:
     """Copy the live database with SQLite's backup API, check the copy, keep the newest 14.
 
     Older backup COPIES beyond 14 are removed (the live database is never touched),
-    so backups can't fill the tablet. Point BACKUP_DIR into your vault to sync them to Drive.
+    so backups can't fill the tablet. BACKUP_DIR sits in your Drive-synced work folder.
     """
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     dest = BACKUP_DIR / f"memory-{time.strftime('%Y%m%d-%H%M%S')}.db"
@@ -240,7 +371,7 @@ def remember(text: str) -> None:
     if not MEMORY_MD.exists():
         MEMORY_MD.write_text("# Things the Lobster knows about me\n\n", encoding="utf-8")
     with MEMORY_MD.open("a", encoding="utf-8") as f:
-        f.write(f"- {text.strip()}\n")
+        f.write(f"- {' '.join(text.split())}\n")
     add_facts([text.strip()], "owner", "MEMORY.md")
 
 
@@ -258,11 +389,16 @@ def sync_memory_md() -> int:
     wanted = {_hash(l) for l in lines}
     con = _db()
     fts = _has_fts(con)
+    removed = False
     with con:
         for fid, h in con.execute("SELECT id, text_hash FROM facts WHERE tag='owner'").fetchall():
             if h not in wanted:
+                removed = True
                 con.execute("DELETE FROM facts WHERE id=?", (fid,))
                 if fts:
                     con.execute("DELETE FROM facts_fts WHERE rowid=?", (fid,))
     con.close()
+    if removed:
+        with _vectors.lock:
+            _vectors.reset()                   # rebuild the in-memory index without them
     return add_facts(lines, "owner", "MEMORY.md")

@@ -4,9 +4,11 @@
   read_jsonl   -> read a log back; a half-written last line (say, after the
                   tablet died mid-write) is skipped instead of breaking everything
   write_atomic -> replace a file in one step, so nothing ever sees it half-written
+  timed        -> measure a step (research, digest, brief...) so speed is known, not guessed
 """
 import json
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -41,3 +43,37 @@ def write_atomic(path: Path, data: str | bytes) -> None:
     else:
         tmp.write_text(data, encoding="utf-8")
     tmp.replace(path)
+
+
+# --- Timings: every slow step records how long it took --------------------------
+
+_timings_file: Path | None = None
+
+
+def set_timings_file(path: Path) -> None:
+    global _timings_file
+    _timings_file = path
+
+
+@contextmanager
+def timed(step: str):
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        if _timings_file is not None:
+            try:
+                append_jsonl(_timings_file, {"step": step, "seconds": round(time.monotonic() - start, 2)})
+            except OSError:
+                pass
+
+
+def timing_summary(last: int = 20) -> dict[str, float]:
+    """Average seconds per step over its last few runs."""
+    if _timings_file is None:
+        return {}
+    runs: dict[str, list[float]] = {}
+    for r in read_jsonl(_timings_file)[-2000:]:
+        if isinstance(r.get("seconds"), (int, float)):
+            runs.setdefault(str(r.get("step")), []).append(r["seconds"])
+    return {k: round(sum(v[-last:]) / len(v[-last:]), 1) for k, v in runs.items()}

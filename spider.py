@@ -1,14 +1,14 @@
-"""🕷️ The Spider: fetches, never thinks.
+"""🕷️ The Spider: the collector. It fetches; it never thinks.
 
-It has no model and never follows a link it found inside a page. It fetches
-only: the sources you added, documents you asked it to /save, and search
-results from the fixed research providers in research.py.
+It has no model and never follows a link it found inside a page. It collects
+only two things:
+  - research material from FIXED providers (Wikipedia's API, a news search),
+    for search words the Lobster gives it; it never chooses a site itself
+  - documents you asked it to /save, kept with a receipt
 
-Every link passes Shiba first (no local or private addresses, checked again
-on every redirect). It respects robots.txt for crawling, waits between
-requests to the same site, retries politely, and skips unchanged pages.
-
-Run by hand:  python spider.py
+Every link passes Shiba first (no local or private addresses, checked again on
+every redirect). It respects robots.txt for ordinary pages, waits between
+requests to the same site, and retries politely.
 """
 import hashlib
 import json
@@ -17,16 +17,16 @@ import time
 import urllib.error
 import urllib.request
 import urllib.robotparser
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 import shiba
-from config import CACHE_DIR, CONTACT, DATA_DIR, LIBRARY_DIR, PROXY, SOURCES_FILE
+from config import CACHE_DIR, CONTACT, LIBRARY_DIR, PROXY
 from store import write_atomic
 
 MAX_BYTES = 2_000_000          # pages: anything longer is cut
 MAX_DOC_BYTES = 50_000_000     # /save documents: anything longer is refused
 MAX_REDIRECTS = 3
-DOMAIN_GAP = 10.0              # seconds between requests to the same site (crawling)
+DOMAIN_GAP = 10.0              # seconds between requests to the same ordinary site
 API_GAP = 1.0                  # official APIs built for programs (e.g. Wikipedia's) need less
 RETRIES = 2
 RETRY_BASE = 2.0               # seconds; doubles each retry
@@ -41,8 +41,13 @@ DOC_TYPES = {"application/pdf": ".pdf", "text/html": ".html", "text/plain": ".tx
              "text/csv": ".csv", "application/json": ".json", "application/xml": ".xml"}
 
 INBOX = CACHE_DIR / "inbox"
-SEEN = CACHE_DIR / "seen.json"      # url -> sha256, etag, last-modified of the last download
-SOURCES_ARCHIVE = DATA_DIR / "sources-archive.txt"
+
+PROVIDERS = {                       # the only places research ever reads from
+    "wikipedia": "https://en.wikipedia.org/w/api.php",
+    "wikipedia_page": "https://en.wikipedia.org/wiki/",
+    "news": "https://news.google.com/rss/search",
+}
+PER_SEARCH = 3                      # search results looked at per phrase
 
 
 class Refused(Exception):
@@ -165,88 +170,71 @@ def fetch(url: str, opener, headers: dict | None = None, robots: bool = True, ga
     }
 
 
-def to_inbox(page: dict, origin: str, job: int | None = None) -> None:
+def to_inbox(page: dict, origin: str, job: int | None = None, question: str = "") -> None:
     """Hand a page to the Elephant, untouched."""
     INBOX.mkdir(parents=True, exist_ok=True)
-    record = dict(page, origin=origin, job=job)
+    record = dict(page, origin=origin, job=job, question=question)
     name = f"{time.time_ns()}-{hashlib.sha1(page['url'].encode()).hexdigest()[:10]}.json"
     write_atomic(INBOX / name, json.dumps(record, ensure_ascii=False))
 
 
-# --- Your source list --------------------------------------------------------------
-
-def load_sources() -> list[str]:
-    if not SOURCES_FILE.exists():
-        return []
-    return [l.strip() for l in SOURCES_FILE.read_text(encoding="utf-8").splitlines()
-            if l.strip() and not l.lstrip().startswith("#")]
-
-
-def add_source(url: str) -> str:
-    """Only called from your own /addsource command, never by the model."""
-    url = url.strip()
-    problem = shiba.url_problem(url, allow_unresolved=True)
-    if problem:
-        shiba.audit("source_refused", url=url, reason=problem)
-        return f"❌ Not added: {problem}."
-    if url in load_sources():
-        return "Already watching that."
-    SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with SOURCES_FILE.open("a", encoding="utf-8") as f:
-        f.write(url + "\n")
-    shiba.audit("source_added", url=url)
-    return f"🕷️ Watching {url}"
-
-
-def remove_source(url: str) -> str:
-    """Stops watching a source. The line is archived, never deleted."""
-    url = url.strip()
-    sources = load_sources()
-    if url not in sources:
-        return "I'm not watching that."
-    with SOURCES_ARCHIVE.open("a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M')} {url}\n")
-    lines = [l for l in SOURCES_FILE.read_text(encoding="utf-8").splitlines() if l.strip() != url]
-    write_atomic(SOURCES_FILE, "\n".join(lines) + "\n")
-    shiba.audit("source_removed", url=url)
-    return f"🕷️ Stopped watching {url} (kept in sources-archive.txt)."
-
-
-def crawl() -> dict:
-    INBOX.mkdir(parents=True, exist_ok=True)
-    seen = json.loads(SEEN.read_text()) if SEEN.exists() else {}
-    opener = _opener()
-    report = {"new": 0, "unchanged": 0, "failed": []}
-    for url in load_sources():
-        prev = seen.get(url)
-        if isinstance(prev, str):                 # older format: just the hash
-            prev = {"sha256": prev}
-        headers = {}
-        if prev and prev.get("etag"):
-            headers["If-None-Match"] = prev["etag"]
-        if prev and prev.get("last_modified"):
-            headers["If-Modified-Since"] = prev["last_modified"]
-        try:
-            page = fetch(url, opener, headers=headers)
-        except Refused as e:
-            report["failed"].append(f"{url} (refused: {e})")
-            continue
-        except Exception as e:
-            report["failed"].append(f"{url} ({type(e).__name__})")
-            continue
-        if page.get("not_modified") or (prev and prev.get("sha256") == page["sha256"]):
-            report["unchanged"] += 1
-            continue
-        to_inbox(page, origin="source")
-        seen[url] = {"sha256": page["sha256"], "etag": page["etag"], "last_modified": page["last_modified"]}
-        report["new"] += 1
-    SEEN.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(SEEN, json.dumps(seen, indent=1))
-    return report
-
-
 def inbox_count() -> int:
     return len(list(INBOX.glob("*.json"))) if INBOX.exists() else 0
+
+
+# --- Research collecting (fixed providers only) -------------------------------------
+
+def _wiki_api(params: dict) -> str:
+    return PROVIDERS["wikipedia"] + "?" + urlencode(dict(params, format="json", formatversion=2))
+
+
+def wikipedia(phrases: list[str], limit: int, should_stop=None) -> dict:
+    """Search Wikipedia for each phrase and fetch the articles' plain text.
+
+    Returns {"articles": [{"title", "url", "text", "fetched_at", "sha256"}], "failed": [...],
+             "network_errors": n}. The phrases are words only; URLs are built here, by code.
+    """
+    opener = _opener()
+    articles, failed, seen, network_errors = [], [], set(), 0
+    for phrase in phrases:
+        if len(articles) >= limit or (should_stop and should_stop()):
+            break
+        try:
+            hits = json.loads(fetch(_wiki_api({"action": "query", "list": "search", "srsearch": phrase,
+                                               "srlimit": PER_SEARCH}), opener, robots=False,
+                                    gap=API_GAP)["content"])
+            titles = [h["title"] for h in hits.get("query", {}).get("search", [])
+                      if isinstance(h, dict) and isinstance(h.get("title"), str)]
+        except Refused as e:
+            failed.append(f"search '{phrase}': {e}")
+            continue
+        except Exception as e:
+            network_errors += 1
+            failed.append(f"search '{phrase}': {type(e).__name__}")
+            continue
+        for title in titles:
+            if len(articles) >= limit or title in seen:
+                continue
+            seen.add(title)
+            try:
+                page = fetch(_wiki_api({"action": "query", "prop": "extracts", "explaintext": 1,
+                                        "redirects": 1, "titles": title}), opener, robots=False, gap=API_GAP)
+                article = json.loads(page["content"])["query"]["pages"][0]
+                text = article.get("extract") or ""
+            except Exception as e:
+                failed.append(f"article '{title}': {type(e).__name__}")
+                continue
+            if text.strip():
+                articles.append({"title": article["title"], "text": text,
+                                 "url": PROVIDERS["wikipedia_page"] + quote(article["title"].replace(" ", "_")),
+                                 "fetched_at": page["fetched_at"], "sha256": page["sha256"]})
+    return {"articles": articles, "failed": failed, "network_errors": network_errors}
+
+
+def news(phrase: str) -> dict:
+    """The news search feed for one phrase (only for questions about recent events)."""
+    url = PROVIDERS["news"] + "?" + urlencode({"q": phrase, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+    return fetch(url, _opener(), robots=False, gap=API_GAP)
 
 
 # --- Saving documents (/save) ------------------------------------------------------
@@ -315,13 +303,9 @@ def save_document(url: str) -> str:
         text = got["raw"].decode(got["charset"], errors="replace")
     size = f"{len(got['raw']) / 1_000_000:.1f} MB"
     if text:
-        to_inbox({"url": url, "fetched_at": receipt["fetched_at"],
+        to_inbox({"url": url, "fetched_at": receipt["fetched_at"], "title": path.name,
                   "content_type": "text/plain" if ext == ".pdf" else got["content_type"],
                   "content": text, "sha256": digest}, origin="document")
-        return f"📄 Saved {path.name} ({size}) to the Library. Its text is queued for the Elephant."
+        return f"📄 Saved {path.name} ({size}) to the Library. The Elephant will index its text for /ask."
     note = " Install pypdf (pip install pypdf) to index PDF text." if ext == ".pdf" else ""
     return f"📄 Saved {path.name} ({size}) to the Library.{note}"
-
-
-if __name__ == "__main__":
-    print(crawl())

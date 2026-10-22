@@ -36,15 +36,24 @@ MODEL = os.getenv("MODEL", "qwen2.5:3b")                  # chat + fact extracti
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 CHAT_KEEP_ALIVE = os.getenv("CHAT_KEEP_ALIVE", "5m")      # how long the model stays in RAM after a chat
 
-# --- Storage (internal storage; keep the database off removable drives) ---
+# --- Storage ---
+# Lobster's private working state stays on the tablet's internal storage.
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
-CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache"))   # Spider's raw downloads
-DB_PATH = DATA_DIR / "memory.db"
+CACHE_DIR = Path(os.getenv("CACHE_DIR", DATA_DIR / "cache"))   # the Spider's raw downloads
+DB_PATH = DATA_DIR / "memory.db"                             # the Elephant's index of facts and cards
 MEMORY_MD = DATA_DIR / "MEMORY.md"                          # facts you approve; you can edit it
-SOURCES_FILE = DATA_DIR / "sources.txt"                     # URLs the Spider may fetch
 ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "")                  # optional: USB SSD folder for old raw cache
-BACKUP_DIR = Path(os.getenv("BACKUP_DIR", DATA_DIR / "backups"))  # point it into Slothvault to sync to Drive
-LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))  # /save documents; point it into Slothvault to sync to Drive
+
+# Your vault: the Elephant writes cards, source pages and maps into VAULT_DIR/<VAULT_INBOX>.
+VAULT_DIR = Path(os.getenv("VAULT_DIR", DATA_DIR / "vault"))
+VAULT_INBOX = os.getenv("VAULT_INBOX", "Lobster Inbox")
+# Working files (documents, backups) live apart from the knowledge base; sync this folder to Drive too.
+WORK_DIR = Path(os.getenv("WORK_DIR", DATA_DIR / "work"))
+LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", WORK_DIR / "Library"))   # /save documents and their receipts
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", WORK_DIR / "Backups"))      # nightly memory backups (newest 14)
+# Your loci: the subject areas a card can belong to (edit freely; room to grow).
+LOCI = [l.strip() for l in os.getenv(
+    "LOCI", "politics, economics, world history, markets and trading, language and culture").split(",") if l.strip()]
 
 # --- Web identity: sites like Wikipedia ask bots for a way to contact their owner ---
 CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or your GitHub URL
@@ -59,9 +68,11 @@ WEB_CERT = os.getenv("WEB_CERT", "")                 # optional HTTPS: certifica
 WEB_KEY = os.getenv("WEB_KEY", "")
 
 # --- Schedules ---
-SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.13"
+VERSION = "2026-10-22.15"
+
+import store  # noqa: E402  (after the paths above are known)
+store.set_timings_file(DATA_DIR / "timings.jsonl")
 
 IDENTITY = (BASE_DIR / "identity.txt").read_text(encoding="utf-8")

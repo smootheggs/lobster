@@ -30,12 +30,12 @@ from urllib.parse import parse_qs, unquote, urlparse
 import actions
 import config
 import conversation
+import elephant
 import memory
 import ollama
 import research
 import shiba
-import spider
-from store import read_jsonl
+from store import read_jsonl, timing_summary
 
 log = logging.getLogger("lobster.web")
 
@@ -177,13 +177,20 @@ class Gate:
 # --- The app: routes -----------------------------------------------------------------------
 
 class App:
+    """The app's API. Every route calls the same functions Telegram does (conversation.py)."""
+
     def __init__(self, gate: Gate, loop: asyncio.AbstractEventLoop, hosts: set[str],
-                 busy=lambda: False, secure: bool = False):
-        self.gate, self.loop, self.hosts, self.busy, self.secure = gate, loop, hosts, busy, secure
+                 busy=lambda: False, secure: bool = False, now=lambda: "idle"):
+        self.gate, self.loop, self.hosts, self.busy, self.secure, self.now = gate, loop, hosts, busy, secure, now
 
     def run(self, coro, timeout: int = 900):
         """Run a conversation step on the bot's event loop, where Telegram's run too."""
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)
+
+    @staticmethod
+    def _text(body, key: str, limit: int = MAX_CHAT) -> str | None:
+        v = body.get(key)
+        return v.strip()[:limit] if isinstance(v, str) else None
 
     # GET /api/...
     def me(self, s, q):
@@ -191,13 +198,22 @@ class App:
 
     def status(self, s, q):
         st = memory.stats()
-        return {"model_up": ollama.alive(), "model": config.MODEL, "owner_facts": st["owner"], "web_facts": st["web"],
-                "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(), "sources": len(spider.load_sources()),
-                "inbox": spider.inbox_count(), "research_waiting": len(research.pending()),
-                "last_backup": memory.last_backup(), "busy": self.busy(), "version": config.VERSION}
+        t = timing_summary()
+        return {"model_up": ollama.alive(), "model": config.MODEL, "owner_facts": st["owner"],
+                "web_facts": st["web"], "cards": st["cards"], "unreviewed": st["unreviewed"],
+                "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(),
+                "research_waiting": len(research.pending()), "now": self.now(), "busy": self.busy(),
+                "last_backup": memory.last_backup(), "research_seconds": t.get("research"),
+                "version": config.VERSION}
 
     def research_list(self, s, q):
-        return {"jobs": research.history(20)}
+        return {"jobs": research.history(30)}
+
+    def cards_list(self, s, q):
+        status = q.get("status", [""])[0]
+        job = q.get("job", [""])[0]
+        return {"cards": memory.cards("card", status if status in memory.STATUSES else None,
+                                      int(job) if job.isdigit() else None, limit=100)}
 
     def library(self, s, q):
         items = []
@@ -212,17 +228,19 @@ class App:
                         except json.JSONDecodeError:
                             pass
                     items.append({"name": f.name, "bytes": f.stat().st_size, "url": receipt.get("url", ""),
-                                  "saved": receipt.get("saved", ""), "sha256": receipt.get("sha256", "")})
+                                  "saved": str(receipt.get("fetched_at", ""))[:16].replace("T", " "),
+                                  "sha256": receipt.get("sha256", "")})
         return {"items": items[:200]}
 
     def memory_search(self, s, q):
         query = q.get("q", [""])[0][:200]
-        facts = memory.search(query, k=12) if query.strip() else []
+        hits = elephant.ask(query)["hits"] if query.strip() else []
         notes = [n.get("text", "") for n in read_jsonl(actions.NOTES)[-10:]][::-1]
-        return {"facts": facts, "notes": notes}
+        return {"facts": [dict(h, source_title=elephant.source_title(h["source"]) if h["tag"] == "web" else "")
+                          for h in hits], "notes": notes}
 
     def audit_list(self, s, q):
-        return {"rows": shiba.recent(40)[::-1]}
+        return {"rows": shiba.recent(20)[::-1]}
 
     # POST /api/...
     def chat(self, s, body):
@@ -237,7 +255,7 @@ class App:
             return {"reply": conversation.note(text[5:].strip()), "code": None}
         busy = "🐘 The Elephant is digesting, so replies may be slow." if self.busy() else None
         r = self.run(conversation.handle(text, busy=busy))
-        return {"reply": r["reply"], "code": r["code"]}
+        return {"reply": r["reply"], "code": r["code"], "ask": r.get("ask"), "action": r.get("action")}
 
     def approve(self, s, body):
         return {"reply": self.run(conversation.approve(str(body.get("code", ""))))}
@@ -246,13 +264,32 @@ class App:
         return {"reply": conversation.cancel(str(body.get("code", "")))}
 
     def research_new(self, s, body):
-        q = str(body.get("question", "")).strip()
-        if not q:
-            return {"reply": "What should I research?"}
-        verdict, reason = shiba.decide("research", q, tainted=False)
-        if verdict == shiba.BLOCK:
-            return {"reply": conversation._blocked("research", reason)}
-        return {"reply": actions.run_action("research", q)}
+        return {"reply": conversation.research(self._text(body, "question", 500) or "")}
+
+    def ask(self, s, body):
+        q = self._text(body, "question", 500) or ""
+        return {"reply": conversation.ask(q), "hits": self.memory_search(s, {"q": [q]})["facts"] if q else []}
+
+    def note(self, s, body):
+        return {"reply": conversation.note(self._text(body, "text") or "")}
+
+    def save(self, s, body):
+        return {"reply": conversation.save_link(self._text(body, "url", 1000) or "")}
+
+    def stop(self, s, body):
+        return {"reply": conversation.stop()}
+
+    def new(self, s, body):
+        return {"reply": conversation.new_chat()}
+
+    def review(self, s, body):
+        card_id, status = str(body.get("id", ""))[:40], str(body.get("status", ""))
+        if status not in ("verified", "wrong", "unreviewed"):
+            return {"ok": False, "reply": "Unknown review."}
+        if shiba.paused():
+            return {"ok": False, "reply": "⏸️ Lobster is paused. Send /resume first."}
+        ok = elephant.review(card_id, status)
+        return {"ok": ok, "reply": f"Marked {status}." if ok else "Couldn't find that card in your vault."}
 
     def pause(self, s, body):
         shiba.audit("web_command", command="pause")
@@ -266,10 +303,11 @@ class App:
         self.gate.logout(s["token"])
         return {"reply": "Logged out."}
 
-    GETS = {"/api/me": me, "/api/status": status, "/api/research": research_list, "/api/library": library,
-            "/api/memory": memory_search, "/api/audit": audit_list}
+    GETS = {"/api/me": me, "/api/status": status, "/api/research": research_list, "/api/cards": cards_list,
+            "/api/library": library, "/api/memory": memory_search, "/api/audit": audit_list}
     POSTS = {"/api/chat": chat, "/api/approve": approve, "/api/cancel": cancel, "/api/research": research_new,
-             "/api/pause": pause, "/api/resume": resume, "/api/logout": logout}
+             "/api/ask": ask, "/api/note": note, "/api/save": save, "/api/stop": stop, "/api/new": new,
+             "/api/review": review, "/api/pause": pause, "/api/resume": resume, "/api/logout": logout}
 
 
 def make_handler(app: App):
@@ -442,7 +480,7 @@ def make_handler(app: App):
     return Handler
 
 
-def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None,
+def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None, now=lambda: "idle",
           bind: str | None = None, port: int | None = None) -> ThreadingHTTPServer | None:
     """Open the door, or explain why not. Returns the running server, or None."""
     bind = config.WEB_BIND if bind is None else bind
@@ -456,7 +494,7 @@ def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None,
         return None
     gate = Gate(config.WEB_PASSWORD_HASH, notify=notify)
     secure = bool(config.WEB_CERT and config.WEB_KEY)
-    app = App(gate, loop, allowed_hosts(bind, config.WEB_HOSTS), busy, secure)
+    app = App(gate, loop, allowed_hosts(bind, config.WEB_HOSTS), busy, secure, now)
     server = ThreadingHTTPServer((bind, port), make_handler(app))
     server.daemon_threads = True
     if secure:
