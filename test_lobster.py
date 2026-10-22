@@ -17,6 +17,8 @@ What it proves:
   - /save keeps documents with a receipt and never overwrites
   - research jobs: the model only proposes words, the Spider only talks to fixed
     providers, injected facts are rejected, and links in the brief are stripped
+  - every adapter gets the same decisions; caution survives a restart; /note works
+    with the model down; chat and the Elephant take turns with the model
 
 Nothing here touches your real data: it uses a temporary folder and a fake
 Ollama server and a fake website on random local ports. Your real data/ folder
@@ -245,6 +247,7 @@ os.environ["TELEGRAM_TOKEN"] = "test-token"
 import actions   # noqa: E402
 import brain     # noqa: E402
 import config    # noqa: E402
+import conversation  # noqa: E402
 import elephant  # noqa: E402
 import memory    # noqa: E402
 import ollama    # noqa: E402
@@ -837,6 +840,106 @@ def _():
 
 # --- 4. Bot flow (Telegram handlers driven by fake messages, no network) -------
 
+
+# --- Build 4: one conversation engine for every adapter ---------------------------
+
+print("\n🗣️ Conversation core")
+
+
+def _handle(text, busy=None):
+    return asyncio.run(conversation.handle(text, busy=busy))
+
+
+@test("caution after web facts survives a restart")
+def _():
+    import importlib
+    conversation.reset_session()
+    _handle("What are copper prices doing in October?")
+    importlib.reload(conversation)             # as if the tablet rebooted
+    r = _handle("please save a note")
+    assert r["code"], "after a restart, a write right after web facts ran without asking"
+    shiba.cancel(r["code"])
+    conversation.reset_session()
+
+
+@test("a damaged session file starts fresh instead of crashing")
+def _():
+    conversation.SESSION.write_text("{half a json")
+    assert conversation.load_session() == {"history": [], "taint_turns": 0}
+    conversation.reset_session()
+
+
+@test("the session keeps only the last 10 turns")
+def _():
+    conversation.reset_session()
+    for i in range(8):
+        _handle(f"hello {i}")
+    s = json.loads(conversation.SESSION.read_text())
+    assert len(s["history"]) == conversation.HISTORY_TURNS, len(s["history"])
+    conversation.reset_session()
+
+
+@test("/note works with the model down, and still respects /pause")
+def _():
+    real = ollama._post
+
+    def down(*a, **k):
+        raise ConnectionRefusedError("model down")
+    ollama._post = down
+    try:
+        assert conversation.note("Call the bank on Monday") == "📝 Saved."
+        assert "Call the bank on Monday" in actions.NOTES.read_text()
+        shiba.pause()
+        try:
+            r = conversation.note("Should not be saved")
+            assert "/resume" in r, r
+        finally:
+            shiba.resume()
+        assert "Should not be saved" not in actions.NOTES.read_text()
+        r = _handle("hello")
+        assert "/note" in r["reply"] and r["code"] is None, r
+    finally:
+        ollama._post = real
+
+
+@test("Shiba's block replies say what to do next")
+def _():
+    shiba.pause()
+    try:
+        r = _handle("please save a note")
+    finally:
+        shiba.resume()
+    assert "Shiba blocked" in r["reply"] and "/resume" in r["reply"], r["reply"]
+    assert "shorter" in conversation._blocked("save_note", "text is longer than 500 characters")
+    conversation.reset_session()
+
+
+@test("the router and the extractor run at temperature 0")
+def _():
+    CALLS.clear()
+    _handle("hello there")
+    elephant.extract("The Port of Hamburg handled 7.7 million containers in 2025.")
+    kinds = {}
+    for path, p in CALLS:
+        props = (p.get("format") or {}).get("properties", {})
+        if path == "/api/chat" and ("action" in props or "facts" in props):
+            kinds["router" if "action" in props else "extractor"] = p["options"]["temperature"]
+    assert kinds == {"router": 0.0, "extractor": 0.0}, kinds
+    conversation.reset_session()
+
+
+@test("chat and the Elephant take turns with the model")
+def _():
+    import time as _t
+    order = []
+    with ollama.model_turn:                     # the Elephant is mid-call
+        t = threading.Thread(target=lambda: (ollama.embed(config.EMBED_MODEL, ["hi"]), order.append("chat")))
+        t.start()
+        _t.sleep(0.3)
+        order.append("elephant done")
+    t.join(5)
+    assert order == ["elephant done", "chat"], order
+
 print("\n💬 Bot flow")
 
 try:
@@ -867,6 +970,10 @@ async def _noop(*a, **k):
 
 
 def _say(text, user_data, user_id=4242):
+    """user_data stands for one conversation: a fresh {} starts a fresh session."""
+    if not user_data.get("_started"):
+        user_data["_started"] = True
+        conversation.reset_session()
     sent = []
     upd = _Obj(effective_user=_Obj(id=user_id), effective_chat=_Obj(id=1),
                message=_Msg(text, sent))
@@ -952,6 +1059,57 @@ if bot:
         assert "Augustus" in sent[-1] and "No usable facts" not in sent[-1], sent[-1]
         assert any("1/1 digested (Augustus)" in m for m in sent), sent
         assert bot.state["now"] == "idle", bot.state["now"]
+
+    @test("during a digest, chat replies say the Elephant is busy")
+    def _():
+        async def scenario():
+            sent = []
+            upd = _Obj(effective_user=_Obj(id=4242), effective_chat=_Obj(id=1), message=_Msg("hello", sent))
+            await bot.digest_lock.acquire()
+            try:
+                await bot.on_message(upd, _Obj(user_data={}, bot=_Obj(send_chat_action=_noop), args=[]))
+            finally:
+                bot.digest_lock.release()
+            await bot.on_message(upd, _Obj(user_data={}, bot=_Obj(send_chat_action=_noop), args=[]))
+            return sent
+        conversation.reset_session()
+        sent = asyncio.run(scenario())
+        assert sent[0]["text"].startswith("🐘 The Elephant is digesting"), sent[0]
+        assert "digesting" not in sent[1]["text"], sent[1]
+        conversation.reset_session()
+
+    @test("/note saves the text exactly as typed")
+    def _():
+        sent = []
+        upd = _Obj(effective_user=_Obj(id=4242), effective_chat=_Obj(id=1),
+                   message=_Msg("/note Pick up   the dry-cleaning", sent))
+        asyncio.run(bot.cmd_note(upd, _Obj(args=["Pick", "up", "the", "dry-cleaning"])))
+        assert sent[-1]["text"] == "📝 Saved.", sent
+        assert "Pick up   the dry-cleaning" in actions.NOTES.read_text()
+
+    @test("a finished research brief makes the next write ask first")
+    def _():
+        conversation.reset_session()
+        conversation.mark_tainted()
+        sent = _say("please save a note", {"_started": True})
+        assert sent[-1]["buttons"], "a write right after a brief ran without asking"
+        shiba.cancel(sent[-1]["code"])
+        conversation.reset_session()
+
+    @test("a second adapter gets exactly the same decisions as Telegram")
+    def _():
+        script = ["What are copper prices doing in October?", "please save a note", "do something evil", "mark it done"]
+
+        def shape(reply, code):
+            return (bool(code), "Shiba blocked" in reply, "double-checking" in reply)
+        ud = {}
+        tele = [shape(m["text"], m["code"]) for t in script for m in _say(t, ud)[-1:]]
+        conversation.reset_session()
+        other = [shape(r["reply"], r["code"]) for r in (_handle(t) for t in script)]
+        # chat · write after web facts asks · invented action is only a reply · confirm asks
+        assert other == [(False, False, False), (True, False, True), (False, False, False), (True, False, True)], other
+        assert tele == other, f"Telegram {tele} vs other adapter {other}"
+        conversation.reset_session()
 
     @test("confirm-tier actions always ask")
     def _():

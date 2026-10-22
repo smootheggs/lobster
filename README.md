@@ -4,7 +4,7 @@ One process on the Y700 runs everything:
 
 | Part | File | Job | Can it act? |
 |---|---|---|---|
-| 🦞 Lobster | `bot.py`, `brain.py`, `actions.py` | Talks to you on Telegram, picks actions from the allowlist | Only allowlisted actions |
+| 🦞 Lobster | `conversation.py`, `brain.py`, `actions.py`, `bot.py` | One decision path for every way you talk to it (Telegram today); picks actions from the allowlist | Only allowlisted actions |
 | 🕷️ Spider | `spider.py` | Downloads the pages in `sources.txt`, untouched | No model, no actions |
 | 🐘 Elephant | `elephant.py`, `memory.py` | Cleans pages, extracts facts, filters them, stores them tagged `web` | No actions |
 | 🐕 Shiba | `shiba.py`, `seal.py` | Gate for every action, approval, link and web fact; audit log; pause switch | Allows, asks you, or blocks. Plain code, no model |
@@ -46,12 +46,16 @@ python bot.py
 - `/addsource https://example.com/feed.xml`: watch a page or RSS feed
 - `/crawl`, `/digest`: run the Spider or Elephant now
 - `/status`: model, memory, inbox, Shiba, charging
+- `/note <text>`: save a note exactly as typed, with no model involved, so it works even when the model is down
+- `/newchat`: clear the chat history (notes, tasks and memory are untouched)
 - `/research <question>` (or just "research English kings"): fetches articles, digests them, sends a brief with sources
 - `/save <url>`: keeps a document (PDF, HTML, text, CSV) in the Library with a receipt. Set `LIBRARY_DIR` inside your vault to sync it to Google Drive. `pip install pypdf` to index PDF text
 - `/removesource <url>`: stops watching a source (archived, not deleted)
 - `/pause` and `/resume`: freeze every write instantly
 - `/audit`: Shiba's last decisions
 - `/jobs`: what Lobster is doing right now, and which research jobs are waiting
+- While the Elephant is digesting, chat replies start with "🐘 The Elephant is digesting, so replies may be slow": chat and digest take turns with the model instead of fighting over it
+- Chat history and Shiba's after-web-facts caution are saved in `data/session.json`, so a restart doesn't reset them
 - `/backup`: copy the memory database now (it also runs nightly while charging; the newest 14 are kept). Set `BACKUP_DIR` inside your vault to sync backups to Google Drive
 - `/retryfailed`: move pages that failed (e.g. while Ollama was down) back into the inbox
 

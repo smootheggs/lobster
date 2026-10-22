@@ -3,12 +3,18 @@
 Ollama runs on this tablet, so requests here NEVER go through the proxy.
 """
 import json
+import threading
 import urllib.request
 
 from config import OLLAMA_URL
 
 # An opener with an empty proxy map ignores http_proxy/https_proxy env vars.
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# One model on a tablet: every chat and embed call takes its turn here, so a
+# chat message and the Elephant's digest never load the model twice at once.
+# The digest asks one page-chunk at a time, so a chat waits at most one chunk.
+model_turn = threading.Lock()
 
 
 def _post(path: str, payload: dict, timeout: int = 300) -> dict:
@@ -17,7 +23,7 @@ def _post(path: str, payload: dict, timeout: int = 300) -> dict:
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with _opener.open(req, timeout=timeout) as r:
+    with model_turn, _opener.open(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 

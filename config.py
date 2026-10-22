@@ -53,6 +53,6 @@ CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or 
 SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.11"
+VERSION = "2026-10-22.12"
 
 IDENTITY = (BASE_DIR / "identity.txt").read_text(encoding="utf-8")

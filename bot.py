@@ -1,5 +1,8 @@
 """The Lobster's Telegram intercom, plus the Spider/Elephant schedule.
 
+This file only speaks Telegram. What Lobster decides lives in conversation.py,
+so a second way in (the local web app) gets exactly the same safety checks.
+
 Run with:  python bot.py
 
 One process does everything:
@@ -28,6 +31,7 @@ from telegram.ext import (
 )
 
 import config
+import conversation
 import elephant
 import memory
 import ollama
@@ -35,13 +39,11 @@ import research
 import shiba
 import spider
 from actions import run_action
-from brain import think
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("lobster")
 
-TAINT_MEMORY = 6          # after seeing web facts, stay cautious for this many turns
 digest_lock = asyncio.Lock()
 research_lock = asyncio.Lock()
 state = {"last_crawl": 0.0, "last_digest": None, "notified": set(), "now": "idle"}
@@ -102,12 +104,13 @@ async def alert(bot, text: str) -> None:
 HELP = (
     "🦞 Just talk to me, or use:\n"
     "/status: memory, model, Shiba\n"
+    "/note <text>: save a note exactly as typed (works with the model offline)\n"
     "/research <question>: research a topic and send a brief\n"
     "/save <url>: save a document (e.g. an annual report) to the Library\n"
     "/sources, /addsource <url>, /removesource <url>\n"
     "/crawl: run the Spider now · /digest: run the Elephant now · /retryfailed: retry failed pages\n"
     "/pause, /resume: freeze or unfreeze every write\n"
-    "/jobs: what Lobster is doing right now\n"
+    "/jobs: what Lobster is doing right now · /newchat: clear chat history\n"
     "/backup: back up memory now (also nightly while charging)\n"
     "/audit: Shiba's last decisions"
 )
@@ -125,53 +128,19 @@ def approval_buttons(code: str) -> InlineKeyboardMarkup:
     ]])
 
 
+BUSY = "🐘 The Elephant is digesting, so replies may be slow."
+
+
 @owner_only
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Telegram adapter: the decisions themselves live in conversation.py."""
     if not shiba.message_allowed():
         await update.message.reply_text("🐕 Slow down a little: too many messages this minute.")
         return
-    history = ctx.user_data.setdefault("history", [])
-    history.append({"role": "user", "content": update.message.text})
-    del history[:-10]  # short memory keeps a small model focused
-
     await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
-    try:
-        decision = await think(history)
-    except Exception as e:
-        log.exception("Ollama call failed")
-        await update.message.reply_text(f"🧠 My model isn't responding ({type(e).__name__}). "
-                                        "Commands like /status, /pause and /save still work.")
-        return
-
-    # Taint is sticky: web facts from earlier turns are still in the conversation.
-    if decision["tainted"]:
-        ctx.user_data["taint_turns"] = TAINT_MEMORY
-    tainted = ctx.user_data.get("taint_turns", 0) > 0
-    ctx.user_data["taint_turns"] = max(0, ctx.user_data.get("taint_turns", 0) - 1)
-
-    action, text = decision["action"], decision["text"]
-    log.info("Model chose %s(%r) tainted=%s", action, text, tainted)
-    verdict, reason = shiba.decide(action, text, tainted)
-
-    if verdict == shiba.BLOCK:
-        await update.message.reply_text(f"🐕 Shiba blocked {action}: {reason}.")
-        return
-    if verdict == shiba.ASK:
-        code = shiba.new_approval(action, text)
-        why = " (I used web facts just now, so I'm double-checking)" if tainted else ""
-        await update.message.reply_text(
-            f"{decision['reply']}\n\nI'd like to run {action}({text!r}){why}. OK? (valid 10 minutes)",
-            reply_markup=approval_buttons(code),
-        )
-        return
-
-    result = await asyncio.to_thread(run_action, action, text)
-    if action == "research":
-        result += "\n" + now_line()
-    out = "\n\n".join(p for p in (decision["reply"], result) if p) or "🦞"
-    # Don't feed raw memory search results back into the model's context.
-    history.append({"role": "assistant", "content": decision["reply"] if action == "search_memory" else out})
-    await update.message.reply_text(out)
+    r = await conversation.handle(update.message.text, busy=BUSY if digest_lock.locked() else None)
+    reply = r["reply"] + ("\n" + now_line() if r.get("action") == "research" else "")
+    await update.message.reply_text(reply, reply_markup=approval_buttons(r["code"]) if r["code"] else None)
 
 
 async def _edit(query, text: str) -> None:
@@ -201,15 +170,11 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     choice, _, code = (query.data or "").partition(":")
     if choice == "no":
-        shiba.cancel(code)
-        await _edit(query, "Cancelled. Nothing was changed.")
-        return
-    rec, why = shiba.redeem(code) if choice == "ok" else (None, "Unknown button.")
-    if rec is None:
-        await _edit(query, why)
-        return
-    result = await asyncio.to_thread(run_action, rec["action"], rec["text"])
-    await _edit(query, result or "Done.")
+        await _edit(query, conversation.cancel(code))
+    elif choice == "ok":
+        await _edit(query, await conversation.approve(code))
+    else:
+        await _edit(query, "Unknown button.")
 
 
 # --- Commands you type yourself (no model involved) ---------------------------
@@ -267,9 +232,22 @@ async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     verdict, reason = shiba.decide("research", question, tainted=False)
     if verdict == shiba.BLOCK:
-        await update.message.reply_text(f"🐕 Not queued: {reason}.")
+        await update.message.reply_text(conversation._blocked("research", reason))
         return
     await update.message.reply_text(run_action("research", question) + "\n" + now_line())
+
+
+@owner_only
+async def cmd_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save a note exactly as typed: no model, so it works even when the model is down."""
+    text = update.message.text.partition(" ")[2] if update.message.text else " ".join(ctx.args)
+    await update.message.reply_text(await asyncio.to_thread(conversation.note, text))
+
+
+@owner_only
+async def cmd_newchat(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    conversation.reset_session()
+    await update.message.reply_text("🧽 Fresh start: chat history cleared. (Notes, tasks and memory are untouched.)")
 
 
 @owner_only
@@ -334,7 +312,8 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 COMMANDS = {"status": cmd_status, "sources": cmd_sources, "addsource": cmd_addsource,
             "removesource": cmd_removesource, "save": cmd_save, "research": cmd_research,
-            "pause": cmd_pause, "resume": cmd_resume, "jobs": cmd_jobs, "audit": cmd_audit,
+            "note": cmd_note, "newchat": cmd_newchat, "pause": cmd_pause, "resume": cmd_resume,
+            "jobs": cmd_jobs, "audit": cmd_audit,
             "retryfailed": cmd_retryfailed, "crawl": cmd_crawl, "digest": cmd_digest, "backup": cmd_backup}
 
 
@@ -428,10 +407,7 @@ async def run_research_jobs(app) -> None:
             text = await asyncio.to_thread(research.brief, job, gathered["urls"])
             research.mark_done(job["id"], "done", len(gathered["urls"]))
             state["now"] = "idle"
-            try:                       # the brief is web content: be cautious for the next turns
-                app.user_data[config.ALLOWED_USER_ID]["taint_turns"] = TAINT_MEMORY
-            except Exception:
-                pass
+            conversation.mark_tainted()   # the brief is web content: be cautious for the next turns
             await send(config.ALLOWED_USER_ID, text)
 
 
