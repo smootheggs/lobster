@@ -36,6 +36,9 @@ PERMITTED = ("IP:127.0.0.0/255.0.0.0, IP:10.0.0.0/255.0.0.0, IP:172.16.0.0/255.2
              "IP:192.168.0.0/255.255.0.0, IP:100.64.0.0/255.192.0.0, DNS:localhost")
 
 
+PRIVATE_NETS = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")
+
+
 class CertError(Exception):
     pass
 
@@ -103,8 +106,8 @@ def allowed_address(ip: str) -> bool:
         a = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return a.version == 4 and (a.is_loopback or a.is_private or a in ipaddress.ip_network("100.64.0.0/10")) \
-        and not (a.is_unspecified or a.is_link_local or a.is_multicast)
+    # Exactly the ranges the CA is allowed to vouch for, nothing broader.
+    return a.version == 4 and any(a in ipaddress.ip_network(n) for n in PRIVATE_NETS) and not a.is_unspecified
 
 
 def leaf(addresses: list[str]) -> tuple[Path, Path]:

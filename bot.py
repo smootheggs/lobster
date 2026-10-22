@@ -17,6 +17,7 @@ import logging
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from urllib.parse import unquote
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -212,7 +213,7 @@ def status_lines() -> list[str]:
         f"🐘 Memory: {s['owner']} of your facts, {s['web']} web facts · {s['cards']} cards, {s['unreviewed']} to review",
         f"🕷️ {len(research.pending())} research job(s) waiting{speed}",
         f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'on guard'}, {shiba.blocks_last_day()} blocked in 24h",
-        f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (install termux-api)'}",
+        f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (backups still run daily)'}",
         now_line(),
         f"🌐 Internet: {'online' if spider.online() else 'OFFLINE (research waits in the queue)'}",
         *door_lines(),
@@ -250,8 +251,17 @@ COMMANDS = {"research": cmd_research, "ask": cmd_ask, "note": cmd_note, "save": 
 # --- The schedule ------------------------------------------------------------------------
 
 def is_charging() -> bool | None:
-    """Uses the Termux:API app. Returns None if it isn't installed."""
+    """Termux:API if it's there; otherwise Android's battery files. None if neither can be read."""
     if not shutil.which("termux-battery-status"):
+        for status in sorted(Path("/sys/class/power_supply").glob("*/status")):
+            try:
+                value = status.read_text().strip().lower()
+            except OSError:
+                continue
+            if value in ("charging", "full"):
+                return True
+            if value in ("discharging", "not charging"):
+                return False
         return None
     try:
         out = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=15).stdout
@@ -347,13 +357,15 @@ async def background(app: Application) -> None:
                 state["last_review_sync"] = time.time()
                 await asyncio.to_thread(elephant.sync_reviews)
             charging = await asyncio.to_thread(is_charging)
-            if charging and time.time() - state["last_backup_try"] > 20 * 3600:
+            # Unknown (no Termux:API): still back up once a day rather than never.
+            if (charging or charging is None) and time.time() - state["last_backup_try"] > 20 * 3600:
                 state["last_backup_try"] = time.time()
                 last = memory.last_backup()
                 if last is None or last[:10] != time.strftime("%Y-%m-%d"):
                     log.info(await run_backup())
                     await asyncio.to_thread(elephant.retry_failed)
-            if config.DIGEST_ON_CHARGE and charging and spider.inbox_count() and not research.pending():
+            if config.DIGEST_ON_CHARGE and (charging or charging is None) and spider.inbox_count() \
+                    and not research.pending():
                 msg = await run_digest(app.bot, background=True)
                 if msg:
                     await app.bot.send_message(config.ALLOWED_USER_ID, msg)

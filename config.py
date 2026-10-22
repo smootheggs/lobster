@@ -66,6 +66,9 @@ APP_NAME = os.getenv("APP_NAME", "Sloth Lobster")
 # (the tablet's Wi-Fi address, only on networks named in WEB_TRUSTED_WIFI). Never 0.0.0.0.
 WEB_BIND = os.getenv("WEB_BIND", "")
 WEB_TRUSTED_WIFI = [w.strip() for w in os.getenv("WEB_TRUSTED_WIFI", "").split(",") if w.strip()]
+# Without Termux:API (Google Play Termux) the network name can't be read: give the tablet a fixed
+# address on your hotspot (Android Wi-Fi settings > the hotspot > IP settings: Static) and put it here.
+WEB_HOTSPOT_IP = os.getenv("WEB_HOTSPOT_IP", "").strip()
 WEB_TLS = os.getenv("WEB_TLS", "auto").lower()       # auto: HTTPS with Sloth Lobster's own certificate
 WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
 WEB_ALLOW_ALL = os.getenv("WEB_ALLOW_ALL", "0") == "1"   # only if you really mean every network
@@ -77,7 +80,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.19"
+VERSION = "2026-10-22.21"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")

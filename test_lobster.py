@@ -1700,6 +1700,44 @@ else:
     print("  ⏭️  skipped certificate tests: openssl isn't installed (pkg install openssl-tool)")
 
 
+@test("without Termux:API the hotspot door opens only at your fixed hotspot address")
+def _():
+    mk = lambda wifi, ip="": web.Doors(web.App(_gate, _web_loop, set()), 0, ["127.0.0.1", "wifi"], [], True,
+                                       wifi=lambda: wifi, hotspot_ip=ip)
+    d = mk({"ip": "192.168.43.50", "ssid": None})
+    assert d.wanted() == ["127.0.0.1"] and "WEB_HOTSPOT_IP" in d.wifi_note and "192.168.43.50" in d.wifi_note, d.wifi_note
+    d = mk({"ip": "192.168.1.77", "ssid": None}, "192.168.43.50")
+    assert d.wanted() == ["127.0.0.1"], "a different network's address opened the door"
+    d = mk({"ip": "192.168.43.50", "ssid": None}, "192.168.43.50")
+    assert d.wanted() == ["127.0.0.1", "192.168.43.50"] and "open" in d.wifi_note, d.wifi_note
+    d = web.Doors(web.App(_gate, _web_loop, set()), 0, ["127.0.0.1", "wifi"], [], False,
+                  wifi=lambda: {"ip": "192.168.43.50", "ssid": None}, hotspot_ip="192.168.43.50")
+    assert d.wanted() == ["127.0.0.1"], "opened without HTTPS"
+    for bad in ("192.0.2.2", "198.18.0.5", "169.254.1.1", "8.8.8.8", "0.0.0.0"):
+        assert not certs.allowed_address(bad), f"{bad} counted as a private door"
+        d = mk({"ip": bad, "ssid": None}, bad)
+        assert d.wanted() == ["127.0.0.1"], f"door opened on {bad}"
+    ip = web.wifi_ip()
+    assert ip is None or certs.allowed_address(ip), ip
+
+
+@test("a Termux:API that answers nothing useful falls back to the Wi-Fi address")
+def _():
+    real_which, real_run, real_ip = web.shutil.which, web.subprocess.run, web.wifi_ip
+    try:
+        web.shutil.which = lambda name: "/fake/" + name
+        web.wifi_ip = lambda: "10.221.143.222"
+        for answer in ("", "{}", '{"supplicant_state": "COMPLETED", "ip": "10.221.143.222", "ssid": "<unknown ssid>"}',
+                       "Termux:API isn't installed"):
+            web.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=answer, stderr="")
+            assert web.wifi_info() == {"ip": "10.221.143.222", "ssid": None}, answer
+        web.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
+            a, 0, stdout='{"supplicant_state": "COMPLETED", "ip": "10.221.143.222", "ssid": "\\"S25\\""}', stderr="")
+        assert web.wifi_info() == {"ip": "10.221.143.222", "ssid": "S25"}
+    finally:
+        web.shutil.which, web.subprocess.run, web.wifi_ip = real_which, real_run, real_ip
+
+
 @test("logins survive a restart, but only as hashes; 'log out everywhere' ends them all")
 def _():
     store_dir = TMP / "gate"

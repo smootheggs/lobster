@@ -26,6 +26,7 @@ import logging
 import os
 import secrets
 import shutil
+import socket
 import ssl
 import sys
 import subprocess
@@ -611,20 +612,49 @@ def door_problem(entry: str, allow_all: bool = False) -> str | None:
     return None
 
 
-def wifi_info() -> dict | None:
-    """The tablet's Wi-Fi connection (Termux:API): {"ip", "ssid"}, or None when not on Wi-Fi.
-    Reading the network name needs Termux:API's location permission; without it the name is
-    unknown and the Wi-Fi door stays shut."""
-    if not shutil.which("termux-wifi-connectioninfo"):
-        return None
+def wifi_ip() -> str | None:
+    """The tablet's own Wi-Fi address, without Termux:API (the Google Play Termux doesn't have
+    termux-wifi-connectioninfo). Asks the kernel for wlan0's address; if that's refused, asks
+    which address a packet would leave from (a UDP "connect" sends nothing)."""
+    import fcntl
+    import struct
+    for name in ("wlan0", "wlan1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+                raw = fcntl.ioctl(sk.fileno(), 0x8915, struct.pack("256s", name.encode()))   # SIOCGIFADDR
+                ip = socket.inet_ntoa(raw[20:24])
+            if certs.allowed_address(ip) and not ip.startswith("127."):
+                return ip
+        except OSError:
+            continue
     try:
-        out = subprocess.run(["termux-wifi-connectioninfo"], capture_output=True, text=True, timeout=15).stdout
-        d = json.loads(out)
-    except (OSError, ValueError, subprocess.SubprocessError):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.connect(("192.0.2.1", 9))                 # a documentation address: nothing is sent
+            ip = sk.getsockname()[0]
+    except OSError:
         return None
-    if d.get("supplicant_state") != "COMPLETED" or not d.get("ip"):
-        return None
-    return {"ip": str(d["ip"]), "ssid": str(d.get("ssid", "")).strip('"')}
+    a = ipaddress.ip_address(ip)
+    if a.is_loopback or a in ipaddress.ip_network("100.64.0.0/10") or not certs.allowed_address(ip):
+        return None                                       # not Wi-Fi (or Tailscale): no Wi-Fi door
+    return ip
+
+
+def wifi_info() -> dict | None:
+    """The tablet's Wi-Fi connection: {"ip", "ssid"}, or None when not on Wi-Fi.
+    With a working Termux:API the network's name is known. Without one (the Google Play Termux
+    may have the command but no API behind it), ssid is None and only the address is known."""
+    if shutil.which("termux-wifi-connectioninfo"):
+        try:
+            out = subprocess.run(["termux-wifi-connectioninfo"], capture_output=True, text=True, timeout=15).stdout
+            d = json.loads(out)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            d = {}
+        ssid = str(d.get("ssid", "")).strip('"') if isinstance(d, dict) else ""
+        if isinstance(d, dict) and d.get("supplicant_state") == "COMPLETED" and d.get("ip") \
+                and ssid and ssid != "<unknown ssid>":
+            return {"ip": str(d["ip"]), "ssid": ssid}
+    ip = wifi_ip()                               # no usable answer: fall back to the address alone
+    return {"ip": ip, "ssid": None} if ip else None
 
 
 class _QuietServer(ThreadingHTTPServer):
@@ -651,10 +681,12 @@ class Doors:
     """
 
     def __init__(self, app: "App", port: int, entries: list[str], trusted_wifi: list[str],
-                 tls: bool, wifi=wifi_info, extra_hosts: list[str] | None = None, manual_cert=None):
+                 tls: bool, wifi=wifi_info, extra_hosts: list[str] | None = None, manual_cert=None,
+                 hotspot_ip: str = ""):
         self.app, self.port, self.entries, self.tls = app, port, entries, tls
         self.trusted = {t.strip() for t in trusted_wifi if t.strip()}
         self.wifi, self.extra_hosts, self.manual_cert = wifi, extra_hosts or [], manual_cert
+        self.hotspot_ip = hotspot_ip.strip()
         self.servers: dict[str, ThreadingHTTPServer] = {}
         self.lock = threading.Lock()
         self.ctx = None
@@ -677,6 +709,19 @@ class Doors:
                 self.wifi_note = "not on Wi-Fi"
             elif not self.tls:
                 self.wifi_note = "needs HTTPS (pkg install openssl-tool)"
+            elif w["ssid"] is None:
+                # The name can't be read here. The tablet's fixed hotspot address stands in for it:
+                # Android applies a static address only on the one network it was set for.
+                if not self.hotspot_ip:
+                    self.wifi_note = (f"can't read the network name; on your hotspot, set a fixed address "
+                                      f"and put it in WEB_HOTSPOT_IP (now {w['ip']})")
+                elif w["ip"] != self.hotspot_ip:
+                    self.wifi_note = f"{w['ip']} isn't your hotspot address ({self.hotspot_ip})"
+                elif not certs.allowed_address(w["ip"]):
+                    self.wifi_note = f"{w['ip']} isn't a private Wi-Fi address"
+                else:
+                    self.wifi_note = f"open on your hotspot at {w['ip']}"
+                    out.append(w["ip"])
             elif w["ssid"] not in self.trusted:
                 self.wifi_note = f"“{w['ssid'] or 'unknown network'}” isn't a trusted network"
             elif not certs.allowed_address(w["ip"]) or ipaddress.ip_address(w["ip"]).is_loopback:
@@ -768,6 +813,7 @@ def start(loop: asyncio.AbstractEventLoop, busy=lambda: False, notify=None, now=
     gate = Gate(config.WEB_PASSWORD_HASH, notify=notify, store=config.DATA_DIR)
     app = App(gate, loop, set(), busy, tls, now)
     doors = Doors(app, port, entries, config.WEB_TRUSTED_WIFI, tls, extra_hosts=config.WEB_HOSTS,
+                  hotspot_ip=config.WEB_HOTSPOT_IP,
                   manual_cert=manual)
     app.doors = doors
     opened = doors.refresh()
