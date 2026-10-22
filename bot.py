@@ -108,6 +108,7 @@ HELP = (
     "/crawl: run the Spider now · /digest: run the Elephant now · /retryfailed: retry failed pages\n"
     "/pause, /resume: freeze or unfreeze every write\n"
     "/jobs: what Lobster is doing right now\n"
+    "/backup: back up memory now (also nightly while charging)\n"
     "/audit: Shiba's last decisions"
 )
 
@@ -225,6 +226,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'clear'}, {shiba.blocks_last_day()} blocks or rejections in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (install termux-api)'}",
         now_line(),
+        f"💾 Last backup: {memory.last_backup() or 'never'}",
         f"Last digest: {state['last_digest'] or 'never'} · version {config.VERSION}",
     ]))
 
@@ -297,6 +299,21 @@ async def cmd_audit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("🐕 Last decisions:\n" + "\n".join(lines) if lines else "🐕 Nothing logged yet.")
 
 
+async def run_backup() -> str:
+    try:
+        r = await asyncio.to_thread(memory.backup)
+    except Exception as e:
+        shiba.audit("backup_failed", error=f"{type(e).__name__}: {e}")
+        return f"❌ Backup failed: {e}"
+    shiba.audit("backup", file=r["file"], facts=r["facts"])
+    return f"💾 Backed up {r['facts']} facts to {r['file']} (keeping the newest {r['kept']})."
+
+
+@owner_only
+async def cmd_backup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(await run_backup())
+
+
 @owner_only
 async def cmd_retryfailed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     n = await asyncio.to_thread(elephant.retry_failed)
@@ -318,7 +335,7 @@ async def cmd_digest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 COMMANDS = {"status": cmd_status, "sources": cmd_sources, "addsource": cmd_addsource,
             "removesource": cmd_removesource, "save": cmd_save, "research": cmd_research,
             "pause": cmd_pause, "resume": cmd_resume, "jobs": cmd_jobs, "audit": cmd_audit,
-            "retryfailed": cmd_retryfailed, "crawl": cmd_crawl, "digest": cmd_digest}
+            "retryfailed": cmd_retryfailed, "crawl": cmd_crawl, "digest": cmd_digest, "backup": cmd_backup}
 
 
 # --- Spider / Elephant / research schedule --------------------------------------
@@ -367,7 +384,7 @@ async def run_digest(bot=None, job: int | None = None, progress=None, background
     if r["suspicious"] and bot is not None:
         await alert(bot, "rejected several instruction-like facts from:\n" + "\n".join(r["suspicious"])
                     + "\nDetails: /audit")
-    msg = (f"🐘 Digested {r['pages']} pages: {r['facts']} new facts stored, "
+    msg = (f"🐘 Digested {r['pages']} page{'' if r['pages'] == 1 else 's'}: {r['facts']} new facts stored, "
            f"{r['rejected']} rejected by the filter, {r['failed']} pages failed.")
     if r["stopped"]:
         msg += f" Paused with {r['remaining']} pages left, to run your research first."
@@ -403,7 +420,8 @@ async def run_research_jobs(app) -> None:
             def report_page(i, n, url, job_id=job["id"]):
                 asyncio.run_coroutine_threadsafe(
                     send(config.ALLOWED_USER_ID, f"🐘 #{job_id}: {i}/{n} digested ({_title(url)})"), loop)
-            await send(config.ALLOWED_USER_ID, f"🔎 Searched: {plan}\n📚 {len(gathered['urls'])} articles fetched. "
+            skipped = f"\n⏭️ Skipped as off-topic: {', '.join(gathered['skipped'])}" if gathered["skipped"] else ""
+            await send(config.ALLOWED_USER_ID, f"🔎 Searched: {plan}\n📚 {len(gathered['urls'])} articles kept.{skipped}\n"
                        "Digesting, which takes a few minutes on the tablet...")
             await send(config.ALLOWED_USER_ID, await run_digest(app.bot, job=job["id"], progress=report_page))
             state["now"] = f"writing the brief for research #{job['id']}"
@@ -425,8 +443,14 @@ async def background(app: Application) -> None:
             if (not shiba.paused() and spider.load_sources()
                     and time.time() - state["last_crawl"] > config.SPIDER_EVERY_HOURS * 3600):
                 log.info(await run_crawl())
+            charging = await asyncio.to_thread(is_charging)
+            if charging and time.time() - state.get("last_backup_try", 0) > 20 * 3600:
+                state["last_backup_try"] = time.time()
+                last = memory.last_backup()
+                if last is None or last[:10] != time.strftime("%Y-%m-%d"):
+                    log.info(await run_backup())
             if (config.DIGEST_ON_CHARGE and spider.inbox_count() and not digest_lock.locked()
-                    and await asyncio.to_thread(is_charging)):
+                    and charging):
                 msg = await run_digest(app.bot, background=True)
                 if not msg.startswith("🐘 Digested 0 pages"):
                     await app.bot.send_message(config.ALLOWED_USER_ID, msg)

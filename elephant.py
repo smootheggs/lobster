@@ -172,20 +172,48 @@ def extract(chunk: str) -> list[str]:
 
 # --- 4. Pipeline -------------------------------------------------------------
 
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+WORD = re.compile(r"\w{3,}|\d+")
+
+
+def support(fact: str, chunk: str) -> tuple[str, str]:
+    """The chunk sentence that best matches the fact (by shared words), plus that
+    sentence with its neighbours. No model call, so it costs nothing on the tablet."""
+    sentences = [x.strip() for x in SENTENCE_SPLIT.split(chunk) if x.strip()]
+    if not sentences:
+        return "", ""
+    want = set(WORD.findall(fact.lower()))
+    scores = [len(want & set(WORD.findall(x.lower()))) for x in sentences]
+    i = max(range(len(sentences)), key=scores.__getitem__)
+    return sentences[i], " ".join(sentences[max(0, i - 1):i + 2])
+
+
+def feed_date(xml: str) -> str:
+    """The newest publish date a feed declares, if any."""
+    m = re.search(r"<(?:lastBuildDate|pubDate|updated|published|dc:date)>([^<]{6,40})<", xml)
+    return m.group(1).strip() if m else ""
+
+
 def digest_file(path: Path) -> dict:
     page = json.loads(path.read_text(encoding="utf-8"))
     text = clean(page)
+    meta = {"fetched_at": page.get("fetched_at", ""), "job": page.get("job"),
+            "published_at": feed_date(page["content"]) if "<" in page["content"][:500] else ""}
     kept, rejected = [], 0
     limit = RESEARCH_CHUNKS if page.get("origin") == "research" else MAX_CHUNKS
     for c in chunks(text, limit):
         for fact in extract(c):
+            fact = fact.strip()
             problem = shiba.fact_problem(fact)
+            sentence, window = support(fact, c)
             if problem is None:
-                kept.append(fact.strip())
+                problem = shiba.grounding_problem(fact, sentence, window)
+            if problem is None:
+                kept.append({"text": fact, "sentence": sentence})
             else:
                 rejected += 1
                 shiba.audit("fact_rejected", source=page["url"], reason=problem, fact=fact)
-    stored = memory.add_facts(kept, "web", page["url"])
+    stored = memory.add_facts(kept, "web", page["url"], meta)
     return {"url": page["url"], "stored": stored, "rejected": rejected}
 
 

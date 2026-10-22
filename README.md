@@ -52,6 +52,7 @@ python bot.py
 - `/pause` and `/resume`: freeze every write instantly
 - `/audit`: Shiba's last decisions
 - `/jobs`: what Lobster is doing right now, and which research jobs are waiting
+- `/backup`: copy the memory database now (it also runs nightly while charging; the newest 14 are kept). Set `BACKUP_DIR` inside your vault to sync backups to Google Drive
 - `/retryfailed`: move pages that failed (e.g. while Ollama was down) back into the inbox
 
 ## How it stays safe
@@ -72,6 +73,7 @@ python bot.py
 - Every action goes through `shiba.decide()`: ALLOW, ASK (one-time approval card, valid 10 minutes, bound to that exact action) or BLOCK.
 - Links are refused if they point at the tablet, your home network or reserved addresses, checked again on every redirect.
 - Everything Shiba decides is in `data/audit.jsonl`. Several rejected facts from one page trigger a Telegram alert (max one per 10 minutes).
+- **Grounding:** every number in a web fact must appear in the sentence it came from, and every name in that sentence or the ones beside it; otherwise the fact is rejected and logged. Each stored fact keeps that sentence as its receipt.
 - **The seal:** Lobster won't start if `identity.txt`, `actions.py` or `shiba.py` changed since you last ran `python seal.py`. After any update: read the changes, run the tests, then re-seal. Never let anything else run `seal.py` for you.
 
 ## Next

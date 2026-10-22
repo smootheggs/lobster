@@ -247,6 +247,47 @@ def fact_problem(fact: str) -> str | None:
     return f"matched {m.group(0)!r}" if m else None
 
 
+# --- Grounding: a web fact must match the text it came from ------------------------
+# A small model sometimes garbles while extracting: a wrong year, a mixed-up name.
+# Every number in a fact must appear in its supporting sentence, and every name in
+# that sentence or the ones beside it. Otherwise the fact is rejected and logged.
+
+NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+NAME = re.compile(r"\b[A-Z][\w'’-]*(?:\s+(?:of|de|da|di|du|van|von|ap|al|bin|ibn|la|le|the|y)?\s*[A-Z][\w'’-]*)*")
+CONNECTORS = {"of", "de", "da", "di", "du", "van", "von", "ap", "al", "bin", "ibn", "la", "le", "the", "y"}
+SENTENCE_STARTS = {"the", "a", "an", "in", "on", "at", "by", "for", "from", "with", "under", "during", "after",
+                   "before", "when", "while", "as", "he", "she", "it", "his", "her", "its", "they", "their",
+                   "this", "that", "these", "those", "there", "both", "some", "many", "most", "one", "two"}
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.replace("’", "'").replace(",", "").lower().split())
+
+
+def grounding_problem(fact: str, sentence: str, window: str) -> str | None:
+    """Why this fact doesn't match its source, or None if it does."""
+    s, w = _plain(sentence), _plain(window)
+    for raw in NUMBER.findall(fact):
+        n = raw.replace(",", "").rstrip(".")
+        if not re.search(rf"(?<![\d.]){re.escape(n)}(?![\d])", s):
+            return f"number {n} isn't in its source sentence"
+    for m in NAME.finditer(fact):
+        words = [x for x in m.group(0).replace("’", "'").split()]
+        while words and words[0].lower() in SENTENCE_STARTS:
+            words = words[1:]
+        words = [re.sub(r"'s$", "", x) for x in words]
+        core = [x for x in words if x.lower() not in CONNECTORS]
+        if not core:
+            continue
+        if len(core) == 1:                        # one word: allow other endings (Catholic/Catholicism)
+            stem = core[0].lower()[:6]
+            if not re.search(rf"\b{re.escape(stem)}", w):
+                return f"name {core[0]!r} isn't in its source"
+        elif _plain(" ".join(words)) not in w:    # a full name must appear as written
+            return f"name {' '.join(words)!r} isn't in its source"
+    return None
+
+
 # --- Outbound check (what Lobster sends you) -------------------------------------
 
 URL_IN_TEXT = re.compile(r"https?://\S+|www\.\S+", re.I)

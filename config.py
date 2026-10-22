@@ -43,6 +43,7 @@ DB_PATH = DATA_DIR / "memory.db"
 MEMORY_MD = DATA_DIR / "MEMORY.md"                          # facts you approve; you can edit it
 SOURCES_FILE = DATA_DIR / "sources.txt"                     # URLs the Spider may fetch
 ARCHIVE_DIR = os.getenv("ARCHIVE_DIR", "")                  # optional: USB SSD folder for old raw cache
+BACKUP_DIR = Path(os.getenv("BACKUP_DIR", DATA_DIR / "backups"))  # point it into Slothvault to sync to Drive
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))  # /save documents; point it into Slothvault to sync to Drive
 
 # --- Web identity: sites like Wikipedia ask bots for a way to contact their owner ---
@@ -52,6 +53,6 @@ CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or 
 SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.9"
+VERSION = "2026-10-22.11"
 
 IDENTITY = (BASE_DIR / "identity.txt").read_text(encoding="utf-8")

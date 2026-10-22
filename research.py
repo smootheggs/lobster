@@ -14,17 +14,21 @@ import json
 import re
 from urllib.parse import quote, urlencode
 
+import numpy as np
+
 import memory
 import ollama
 import shiba
 import spider
-from config import CHAT_KEEP_ALIVE, DATA_DIR, MODEL
+from config import CHAT_KEEP_ALIVE, DATA_DIR, EMBED_MODEL, MODEL
 from store import append_jsonl, read_jsonl
 
 QUEUE = DATA_DIR / "research_queue.jsonl"
 MAX_SEARCHES = 4      # search phrases per job
-PER_SEARCH = 2        # articles per phrase
-MAX_PAGES = 5         # articles per job: about 15 model calls on the tablet
+PER_SEARCH = 3        # search results looked at per phrase
+MAX_CANDIDATES = 8    # articles fetched and scored for relevance
+MAX_PAGES = 5         # articles kept per job: about 15 model calls on the tablet
+RELEVANCE_FLOOR = 0.5 # drop articles scoring under half of the best match, even if there's room
 MAX_FACTS = 40        # facts the brief may draw on
 
 PROVIDERS = {
@@ -110,20 +114,41 @@ def _api(params: dict) -> str:
     return PROVIDERS["wikipedia"] + "?" + urlencode(dict(params, format="json", formatversion=2))
 
 
+def _rank(question: str, candidates: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Keep the articles whose opening best matches the question (embedding model, no chat
+    model). Search engines return near-misses; this drops them. Without embeddings: search order."""
+    if len(candidates) <= 1:
+        return candidates, []
+    try:
+        vecs = np.asarray(ollama.embed(EMBED_MODEL, [question] + [c["text"][:600] for c in candidates]),
+                          dtype=np.float32)
+        q, docs = vecs[0], vecs[1:]
+        scores = docs @ q / (np.linalg.norm(docs, axis=1) * np.linalg.norm(q) + 1e-9)
+    except Exception:
+        return candidates[:MAX_PAGES], candidates[MAX_PAGES:]
+    order = sorted(range(len(candidates)), key=lambda i: -scores[i])
+    best = float(scores[order[0]])
+    keep = [i for i in order if scores[i] >= best * RELEVANCE_FLOOR][:MAX_PAGES]   # the best 5
+    kept = [candidates[i] for i in sorted(keep)]           # search order, so the overview stays first
+    skipped = [candidates[i] for i in order if i not in keep]
+    return kept, skipped
+
+
 def gather(job: dict) -> dict:
-    """Fetch articles for a job into the Elephant's inbox. Returns what happened."""
+    """Fetch candidate articles, keep the most relevant, hand them to the Elephant."""
     if shiba.paused():
-        return {"plan": None, "urls": [], "failed": ["paused"], "offline": False}
+        return {"plan": None, "urls": [], "failed": ["paused"], "offline": False, "skipped": []}
     p = plan(job["question"])
     opener = spider._opener()
-    urls, failed, titles_done, network_errors = [], [], set(), 0
+    candidates, failed, titles_done, network_errors = [], [], set(), 0
 
     for phrase in p["searches"]:
-        if len(urls) >= MAX_PAGES:
+        if len(candidates) >= MAX_CANDIDATES:
             break
         try:
             hits = json.loads(spider.fetch(_api({"action": "query", "list": "search", "srsearch": phrase,
-                                                 "srlimit": PER_SEARCH}), opener, robots=False, gap=spider.API_GAP)["content"])
+                                                 "srlimit": PER_SEARCH}), opener, robots=False,
+                                           gap=spider.API_GAP)["content"])
             titles = [h["title"] for h in hits.get("query", {}).get("search", [])
                       if isinstance(h, dict) and isinstance(h.get("title"), str)]
         except spider.Refused as e:
@@ -134,24 +159,29 @@ def gather(job: dict) -> dict:
             failed.append(f"search '{phrase}': {type(e).__name__}")
             continue
         for title in titles:
-            if len(urls) >= MAX_PAGES or title in titles_done:
+            if len(candidates) >= MAX_CANDIDATES or title in titles_done:
                 continue
             titles_done.add(title)
             try:
                 page = spider.fetch(_api({"action": "query", "prop": "extracts", "explaintext": 1,
-                                          "redirects": 1, "titles": title}), opener, robots=False, gap=spider.API_GAP)
+                                          "redirects": 1, "titles": title}), opener, robots=False,
+                                    gap=spider.API_GAP)
                 article = json.loads(page["content"])["query"]["pages"][0]
                 text = article.get("extract") or ""
             except Exception as e:
                 failed.append(f"article '{title}': {type(e).__name__}")
                 continue
-            if not text.strip():
-                continue
-            url = PROVIDERS["wikipedia_page"] + quote(article["title"].replace(" ", "_"))
-            spider.to_inbox({"url": url, "fetched_at": page["fetched_at"], "content_type": "text/plain",
-                             "content": f"{article['title']}. {text}", "sha256": page["sha256"]},
-                            origin="research", job=job["id"])
-            urls.append(url)
+            if text.strip():
+                candidates.append({"title": article["title"], "text": text, "page": page})
+
+    kept, skipped = _rank(job["question"], candidates)
+    urls = []
+    for c in kept:
+        url = PROVIDERS["wikipedia_page"] + quote(c["title"].replace(" ", "_"))
+        spider.to_inbox({"url": url, "fetched_at": c["page"]["fetched_at"], "content_type": "text/plain",
+                         "content": f"{c['title']}. {c['text']}", "sha256": c["page"]["sha256"]},
+                        origin="research", job=job["id"])
+        urls.append(url)
 
     if p["needs_news"] and len(urls) < MAX_PAGES:
         news = PROVIDERS["news"] + "?" + urlencode({"q": clean_phrase(job["question"]),
@@ -164,8 +194,9 @@ def gather(job: dict) -> dict:
             failed.append(f"news: {type(e).__name__}")
 
     offline = not urls and network_errors == len(p["searches"])
-    shiba.audit("research_gathered", job=job["id"], pages=len(urls), failed=len(failed))
-    return {"plan": p, "urls": urls, "failed": failed, "offline": offline}
+    shiba.audit("research_gathered", job=job["id"], pages=len(urls), skipped=len(skipped), failed=len(failed))
+    return {"plan": p, "urls": urls, "failed": failed, "offline": offline,
+            "skipped": [c["title"] for c in skipped]}
 
 
 # --- 4. Brief (model, from stored facts only) --------------------------------------
@@ -201,6 +232,7 @@ def _render(points, n_sources: int) -> list[str]:
         if not isinstance(text, str) or not isinstance(src, int) or not 1 <= src <= n_sources:
             continue
         text = " ".join(shiba.strip_links(text).split())
+        text = re.sub(r"^(\[\d+\]\s*)+|(\s*\[\d+\])+$", "", text).strip()   # citations come from code only
         if text:
             out.append(f"- {text} [{src}]")
     return out[:MAX_POINTS]

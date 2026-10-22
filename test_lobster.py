@@ -75,13 +75,16 @@ WIKI = {
         "He broke with the Pope in the 1530s and became head of the Church of England. He married six times.",
     "Augustus": "Augustus was the first Roman emperor, ruling from 27 BC until his death in AD 14. "
         "He was the adopted son of Julius Caesar.",
+    "Trade route": "A trade route is a logistical network of pathways and stoppages used for the commercial "
+        "transport of cargo across long distances, such as the Silk Road and the Amber Road.",
     "Wars of the Roses": "The Wars of the Roses were civil wars between the houses of Lancaster and York from 1455 to 1487. "
         "Henry VII founded the Tudor dynasty after defeating Richard III in 1485.",
 }
 SEARCH = {"english monarchs": ["List of English monarchs", "Alfred the Great", "William the Conqueror"],
           "norman conquest": ["William the Conqueror", "House of Plantagenet"],
           "house of tudor": ["Henry VIII", "Wars of the Roses"],
-          "roman emperors": ["Augustus"]}
+          "roman emperors": ["Augustus"],
+          "english kings": ["Trade route"]}
 
 
 def _sentences(text):
@@ -107,6 +110,9 @@ def fake_chat(payload):
         points += [{"text": "Read more at https://evil.example/kings", "source": 1},
                    {"text": "A point citing a source that doesn't exist", "source": 99}]
         return json.dumps({"points": points})
+    if "facts" in props and "Owen Tudor" in last:   # a small model garbling a date during extraction
+        return json.dumps({"facts": ["Owen Tudor married Catherine of Valois in 1421.",
+                                     "Owen Tudor married Catherine of Valois around 1431."]})
     if "facts" in props and ("England" in last or "Roman" in last):  # stand-in extractor for the research articles
         doc = last.split("<document>", 1)[-1].split("</document>", 1)[0]
         return json.dumps({"facts": _sentences(doc)[:8]})
@@ -230,6 +236,7 @@ TMP = Path(tempfile.mkdtemp(prefix="lobster-test-"))
 os.environ["OLLAMA_URL"] = f"http://127.0.0.1:{server.server_port}"
 os.environ["DATA_DIR"] = str(TMP / "data")
 os.environ["LIBRARY_DIR"] = str(TMP / "library")
+os.environ["BACKUP_DIR"] = str(TMP / "backups")
 os.environ["ARCHIVE_DIR"] = ""
 os.environ["PROXY"] = ""
 os.environ["ALLOWED_USER_ID"] = "4242"
@@ -247,6 +254,7 @@ import spider    # noqa: E402
 
 assert str(config.DATA_DIR).startswith(str(TMP)), "safety stop: tests must not use your real data folder"
 assert str(config.LIBRARY_DIR).startswith(str(TMP)), "safety stop: tests must not use your real Library"
+assert str(config.BACKUP_DIR).startswith(str(TMP)), "safety stop: tests must not touch your real backups"
 spider.DOMAIN_GAP = 0          # no politeness pauses against the fake website
 spider.RETRY_BASE = 0
 spider.API_GAP = 0
@@ -617,6 +625,7 @@ def _():
     job = research.pending()[-1]
     got = research.gather(job)
     assert got["urls"] and all(u.startswith(research.PROVIDERS["wikipedia_page"]) for u in got["urls"]), got
+    assert "Trade route" in got["skipped"] and not any("Trade_route" in u for u in got["urls"]), got
     assert all(h.startswith("/w/api.php") for h in WEB_HITS), WEB_HITS
     report = elephant.digest()
     assert report["facts"] > 0 and report["rejected"] >= 1, report
@@ -709,10 +718,112 @@ def _():
 
 @test("brief citations always name a real source")
 def _():
+    assert research._render([{"text": "[1] Leading number [1]", "source": 1}], 1) == ["- Leading number [1]"]
     rendered = research._render([{"text": "Kept", "source": 2}, {"text": "Bad number", "source": 9},
                                  {"text": "Not a number", "source": "2"}, {"text": "", "source": 1},
                                  {"text": "Link https://evil.example", "source": 1}], n_sources=3)
     assert rendered == ["- Kept [2]"], rendered
+
+
+@test("grounding: a wrong year or an invented name is rejected")
+def _():
+    src = ("He secretly married Catherine of Valois around 1431. Her son Henry VI was born in 1421. "
+           "In 1282 Dafydd ap Gruffudd, Llywelyn's brother, launched a rebellion.")
+    for fact in ["Owen Tudor married Catherine of Valois in 1421.",
+                 "Dafydd ap Llywelyn launched a rebellion in 1282."]:
+        sentence, window = elephant.support(fact, src)
+        assert shiba.grounding_problem(fact, sentence, window), f"garbled fact passed: {fact}"
+
+
+@test("grounding runs inside the digest: the garbled fact never reaches memory")
+def _():
+    spider.to_inbox({"url": "https://example.org/owen", "content_type": "text/plain", "sha256": "o",
+                     "content": "Owen Tudor was a Welsh courtier. He married Catherine of Valois around 1431. "
+                                "Her son Henry VI had been born in 1421."}, origin="source")
+    report = elephant.digest()
+    con = memory._db()
+    stored = [t for (t,) in con.execute("SELECT text FROM facts WHERE source='https://example.org/owen'")]
+    con.close()
+    assert "Owen Tudor married Catherine of Valois in 1421." not in stored, stored
+    assert "Owen Tudor married Catherine of Valois around 1431." in stored, stored
+    assert any(r["kind"] == "fact_rejected" and "1421" in r.get("reason", "") for r in shiba.recent(50))
+
+
+@test("grounding: faithful facts pass, reworded or not")
+def _():
+    src = "The population rose from about 2.3 million in 1520 to nearly 4 million by 1600. Mary I restored Catholic worship."
+    for fact in ["Population increased from approximately 2.3 million in 1520 to nearly 4 million by 1600.",
+                 "Mary I attempted to reinstate Catholicism."]:
+        sentence, window = elephant.support(fact, src)
+        assert shiba.grounding_problem(fact, sentence, window) is None, fact
+
+
+@test("every stored web fact keeps its receipt")
+def _():
+    con = memory._db()
+    rows = con.execute("SELECT text, sentence, fetched_at, kind, status FROM facts "
+                       "WHERE tag='web' AND source LIKE 'https://en.wikipedia.org/%'").fetchall()
+    con.close()
+    assert rows, "no research facts stored"
+    assert all(r[1] and r[2] and r[3] in ("fact", "reported_claim") and r[4] == "unreviewed" for r in rows), rows[:2]
+    assert memory.kind_of("The minister said rates would rise in 2027.") == "reported_claim"
+
+
+@test("search still works with the embedding model down")
+def _():
+    real = ollama.embed
+
+    def down(*a, **k):
+        raise ConnectionError("embedding model missing")
+    ollama.embed = down
+    try:
+        hits = memory.search("William Conqueror Norman king")
+    finally:
+        ollama.embed = real
+    assert hits and any("William the Conqueror" in h["text"] for h in hits), hits
+
+
+@test("an old (version 1) database upgrades with every fact intact")
+def _():
+    import sqlite3
+    old_path = TMP / "v1.db"
+    con = sqlite3.connect(old_path)
+    con.executescript("""CREATE TABLE facts (id INTEGER PRIMARY KEY, text TEXT NOT NULL, tag TEXT NOT NULL,
+        source TEXT NOT NULL, added TEXT NOT NULL, text_hash TEXT NOT NULL, embedding BLOB NOT NULL,
+        UNIQUE (text_hash, tag));""")
+    con.executemany("INSERT INTO facts (text, tag, source, added, text_hash, embedding) VALUES (?,?,?,?,?,?)",
+                    [(f"Old fact {i} about the kings of England.", "web", "https://example.org/old", "2026-10-20",
+                      f"h{i}", b"") for i in range(5)])
+    con.commit()
+    con.close()
+    real = memory.DB_PATH
+    memory.DB_PATH = old_path
+    try:
+        assert memory.stats()["web"] == 5
+        con = sqlite3.connect(old_path)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(facts)")}
+        version = con.execute("SELECT version FROM schema_version").fetchone()[0]
+        con.close()
+        assert {"sentence", "kind", "status", "published_at"} <= cols and version == memory.SCHEMA_VERSION
+        assert memory.keyword_search("kings England"), "old facts weren't indexed for keyword search"
+    finally:
+        memory.DB_PATH = real
+
+
+@test("a backup opens with every fact, and only the newest 14 are kept")
+def _():
+    import sqlite3
+    r = memory.backup()
+    copy = config.BACKUP_DIR / r["file"]
+    con = sqlite3.connect(copy)
+    n = con.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+    con.close()
+    assert n == r["facts"] == memory.stats()["owner"] + memory.stats()["web"]
+    for i in range(20):                                   # older copies from previous nights
+        (config.BACKUP_DIR / f"memory-20200101-0000{i:02d}.db").write_bytes(b"old")
+    newest = memory.backup()["file"]
+    left = sorted(p.name for p in config.BACKUP_DIR.glob("memory-*.db"))
+    assert len(left) == 14 and newest in left and copy.name in left, left
 
 
 @test("research waits while paused")
