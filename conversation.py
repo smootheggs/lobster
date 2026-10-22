@@ -21,6 +21,7 @@ from store import write_atomic
 SESSION = DATA_DIR / "session.json"
 HISTORY_TURNS = 10      # short memory keeps a small model focused
 TAINT_MEMORY = 6        # after seeing web facts, stay cautious for this many turns
+_turn = asyncio.Lock()  # Telegram and the web app take turns, so neither overwrites the other's session
 
 NEXT_STEP = {           # what to tell you when Shiba blocks something
     "Lobster is paused": "Send /resume first.",
@@ -65,6 +66,11 @@ def _blocked(action: str, reason: str) -> str:
 
 async def handle(text: str, busy: str | None = None) -> dict:
     """One message in, one reply out: {"reply": str, "code": approval code or None}."""
+    async with _turn:
+        return await _handle(text, busy)
+
+
+async def _handle(text: str, busy: str | None) -> dict:
     s = load_session()
     s["history"].append({"role": "user", "content": text})
     s["history"] = s["history"][-HISTORY_TURNS:]

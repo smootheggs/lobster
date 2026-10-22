@@ -64,8 +64,20 @@ def pending() -> list[dict]:
     return [r for r in records if r["type"] == "queued" and r["id"] not in done]
 
 
-def mark_done(job_id: int, status: str, pages: int = 0) -> None:
-    _append({"type": "done", "id": job_id, "status": status, "pages": pages})
+def mark_done(job_id: int, status: str, pages: int = 0, brief: str = "") -> None:
+    _append({"type": "done", "id": job_id, "status": status, "pages": pages, "brief": brief})
+
+
+def history(n: int = 20) -> list[dict]:
+    """Recent jobs, newest first: question, status and the brief (if one was written)."""
+    records = _records()
+    done = {r["id"]: r for r in records if r["type"] == "done"}
+    jobs = [{"id": r["id"], "question": r["question"], "queued": r.get("ts", ""),
+             "status": done[r["id"]]["status"] if r["id"] in done else "waiting",
+             "finished": done[r["id"]].get("ts", "") if r["id"] in done else "",
+             "brief": done[r["id"]].get("brief", "") if r["id"] in done else ""}
+            for r in records if r["type"] == "queued"]
+    return jobs[::-1][:n]
 
 
 # --- 1. Plan (model: words only) -------------------------------------------------

@@ -38,6 +38,7 @@ import ollama
 import research
 import shiba
 import spider
+import web
 from actions import run_action
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -405,7 +406,7 @@ async def run_research_jobs(app) -> None:
             await send(config.ALLOWED_USER_ID, await run_digest(app.bot, job=job["id"], progress=report_page))
             state["now"] = f"writing the brief for research #{job['id']}"
             text = await asyncio.to_thread(research.brief, job, gathered["urls"])
-            research.mark_done(job["id"], "done", len(gathered["urls"]))
+            research.mark_done(job["id"], "done", len(gathered["urls"]), brief=text)
             state["now"] = "idle"
             conversation.mark_tainted()   # the brief is web content: be cautious for the next turns
             await send(config.ALLOWED_USER_ID, text)
@@ -436,7 +437,16 @@ async def background(app: Application) -> None:
 
 
 async def post_init(app: Application) -> None:
-    state["background"] = asyncio.get_running_loop().create_task(background(app))
+    loop = asyncio.get_running_loop()
+    state["background"] = loop.create_task(background(app))
+
+    def notify(text: str) -> None:            # called from the web app's threads
+        asyncio.run_coroutine_threadsafe(app.bot.send_message(config.ALLOWED_USER_ID, text), loop)
+    try:
+        state["web"] = web.start(loop, busy=digest_lock.locked, notify=notify)
+    except OSError as e:                       # e.g. the hotspot is off, so its IP doesn't exist yet
+        log.warning("Web app couldn't start on %s:%s (%s). Telegram still works.",
+                    config.WEB_BIND, config.WEB_PORT, e)
 
 
 def main() -> None:

@@ -17,6 +17,7 @@ import re
 import secrets
 import socket
 import time
+import unicodedata
 from collections import deque
 from urllib.parse import urlparse
 
@@ -29,7 +30,7 @@ AUDIT = DATA_DIR / "audit.jsonl"
 PAUSE_FLAG = DATA_DIR / "PAUSED"
 APPROVALS = DATA_DIR / "approvals.json"
 SEAL_FILE = DATA_DIR / "seal.json"
-SEALED_FILES = ["identity.txt", "actions.py", "shiba.py"]
+SEALED_FILES = ["identity.txt", "actions.py", "shiba.py", "web.py"]
 
 APPROVAL_TTL = 600            # seconds an approval card stays valid
 MAX_TEXT = 500                # longest text an action may receive
@@ -229,21 +230,49 @@ def url_problem(url: str, allow_unresolved: bool = False) -> str | None:
 
 # --- Fact filter (used by the Elephant) ------------------------------------------
 
-SUSPICIOUS = re.compile(
-    r"https?://|www\.|\bignore\b|\bdisregard\b|\bforget\b|\bsystem prompt\b|\binstruction|"
-    r"\byou (are|must|should|will|need)\b|\bassistant\b|\bai (model|system|agent)\b|"
-    r"\blobster\b|\belephant\b|\btelegram\b|\bpassword|\bapi key|\btoken\b|\bexecute\b|"
-    r"\brun (the|this)\b|\bclick\b|\bsend (it|this|to|me|your)\b|\bdownload\b|\bwallet\b|"
-    r"[<>{}`$\\]|\bdo not tell\b|\bsecret",
-    re.I,
-)
+# Two kinds of rule. HARD patterns never belong in an encyclopedia fact. CONTEXT
+# patterns catch words that are innocent alone ("secretly married", "a token of
+# friendship", "the Zimmermann Telegram") only when they're used the way an
+# injection uses them: addressed to an agent, asking for credentials, giving orders.
+AGENTS = r"(?:lobster|elephant|spider|shiba|assistant|ai|bot|agent|model)"
+SUSPICIOUS = re.compile("|".join([
+    # hard
+    r"https?://|www\.|[<>{}`$\\]|@\w{3,}",
+    r"\bsystem prompt\b|\bapi[ _-]?keys?\b|\bpasswords?\b|\bseed phrase\b|\bprivate key\b",
+    r"\byou (?:are|must|should|will|need)\b|\bdo not tell\b|\bfrom now on\b",
+    # orders to forget or ignore the rules
+    r"\b(?:ignore|disregard|forget|override)\b(?:\W+\w+){0,3}?\W+(?:instructions?|rules|prompts?|guidelines|"
+    r"directions|messages|above|everything|previous|prior)\b",
+    r"\b(?:new|updated|following|hidden|secret) instructions?\b",
+    # speaking to an agent, or about its owner
+    rf"^\W*{AGENTS}\s*:|\b(?:the|your|this)\s+{AGENTS}s?\s+(?:must|should|will|shall|needs? to|has to|is to|can now)\b",
+    rf"\b(?:ai|virtual|digital)\s+{AGENTS}\b|\btell the {AGENTS}\b",
+    r"\byour owner\b|\bthe owner'?s (?:notes|files|data|tasks|account|key|messages|memory)\b",
+    # credentials and tricks
+    r"\b(?:bot|api|access|auth|bearer|session|login|telegram) tokens?\b|\btokens? (?:here|below)\b",
+    r"\bsecretly (?:send|tell|forward|add|save|remember|share|copy|post|upload|delete)\b|\bkeep (?:this|it) secret\b",
+    r"\btelegram (?:account|bot|chat|user|channel|group)\b|\bon telegram\b",
+    r"\b(?:crypto|bitcoin|ethereum|wallet) (?:wallet|address|keys?)\b|\bgift cards?\b|\bwire money\b",
+    r"\bexecute (?:this|the following|the command|the code|the script|it now)\b|\brun (?:this|the following)\b",
+    r"\bclick (?:here|this|the link|below)\b|\bdownload (?:this|the file|it now|here)\b",
+    r"\bsend (?:it|this|me|your|the (?:seed|key|code|token|notes|file))\b|\bforward (?:all|every|your)\b",
+]), re.I)
+
+# Look-alike letters an attacker might use to sneak past the rules above.
+HOMOGLYPHS = str.maketrans("аеорсухіјѕԁɡοΑΒΕΗΙΚΜΝΟΡΤΧΥΖ", "aeopcyxijsdgoABEHIKMNOPTXYZ")
+INVISIBLE = re.compile(r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+
+
+def normalize(text: str) -> str:
+    """Fold full-width letters, look-alikes and invisible characters into plain text."""
+    return INVISIBLE.sub("", unicodedata.normalize("NFKC", text)).translate(HOMOGLYPHS)
 
 
 def fact_problem(fact: str) -> str | None:
     fact = fact.strip()
     if not 20 <= len(fact) <= 300:
         return "wrong length"
-    m = SUSPICIOUS.search(fact)
+    m = SUSPICIOUS.search(normalize(fact))
     return f"matched {m.group(0)!r}" if m else None
 
 

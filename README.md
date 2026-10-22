@@ -65,7 +65,7 @@ python bot.py
 - **Action-selector design:** the model can only pick from `ACTIONS`; a JSON schema enforces it and code re-checks it.
 - **Nothing deletes your data.** Notes and tasks are append-only; raw pages are moved, never removed.
 - **Every fact is tagged** `owner` (from you, via `MEMORY.md`) or `web` (untrusted).
-- **Taint policy** (`needs_approval` in `actions.py`): once web facts are in the conversation, any *write* action needs your Yes for the next few turns. `confirm`-tier actions always do.
+- **Taint policy** (`shiba.decide`): once web facts are in the conversation, any *write* action needs your Yes for the next few turns. `confirm`-tier actions always do.
 - **Web text never sets parameters:** sources are added only by your `/addsource` command, never by the model.
 - **The Elephant doesn't trust its model:** pages are cleaned by code first (scripts, comments and hidden elements removed), facts are forced into a schema, then a plain-code filter rejects anything with links, code or instruction-like wording.
 - **No plugins, no shell, no file reading**, and a tiny pinned dependency list.
@@ -78,7 +78,24 @@ python bot.py
 - Links are refused if they point at the tablet, your home network or reserved addresses, checked again on every redirect.
 - Everything Shiba decides is in `data/audit.jsonl`. Several rejected facts from one page trigger a Telegram alert (max one per 10 minutes).
 - **Grounding:** every number in a web fact must appear in the sentence it came from, and every name in that sentence or the ones beside it; otherwise the fact is rejected and logged. Each stored fact keeps that sentence as its receipt.
-- **The seal:** Lobster won't start if `identity.txt`, `actions.py` or `shiba.py` changed since you last ran `python seal.py`. After any update: read the changes, run the tests, then re-seal. Never let anything else run `seal.py` for you.
+- **The fact filter is context-aware:** it rejects orders addressed to an agent, credential requests, links and code, but lets honest history through ("secretly married", "the Zimmermann Telegram", "a token of friendship"). Look-alike letters, full-width text and invisible characters are folded to plain text first, so they can't sneak an instruction past it.
+- **The seal:** Lobster won't start if `identity.txt`, `actions.py`, `shiba.py` or `web.py` changed since you last ran `python seal.py`. After any update: read the changes, run the tests, then re-seal. Never let anything else run `seal.py` for you.
+
+## The phone app (optional)
+
+A private app for the S25 Plus and the S11 Ultra: Chat (with approval cards), Research (queue and briefs), Library (saved documents with receipts), Memory (search and notes) and Shiba (status, audit, pause). It runs inside Lobster and uses the same conversation engine as Telegram, so every message gets the same checks. Telegram keeps working alongside it.
+
+It stays off until you do both steps below.
+
+1. **Choose how the phones reach the tablet.** Set `WEB_BIND` in `.env` to one address:
+   - **Tailscale (recommended):** install Tailscale on the tablet and both phones, sign in with the same account, and use the tablet's `100.x.y.z` address. It works anywhere, and Tailscale encrypts everything.
+   - **Home Wi-Fi or the tablet's hotspot:** use the tablet's Wi-Fi address (`termux-wifi-connectioninfo` shows it). Traffic is not encrypted on that network unless you add a certificate (`WEB_CERT`, `WEB_KEY`), so prefer Tailscale.
+   - Never `0.0.0.0`, and never forward a router port. Lobster refuses `0.0.0.0` unless you set `WEB_ALLOW_ALL=1`.
+2. **Set a password** on the tablet: `python set_password.py`. Only a scrypt hash is stored in `.env`. Then restart Lobster.
+
+Open `http://<WEB_BIND>:8787` on a phone, log in, and choose **Add to Home screen**.
+
+The locks: 5 wrong passwords lock the login for 15 minutes and alert you on Telegram; sessions last 12 hours; every change needs an anti-forgery token; requests for any other host name are refused (stops DNS-rebinding tricks); strict security headers; files can't be read outside `web/` and the Library; Telegram and the app share one rate limit. `web.py` is sealed like Shiba's rules.
 
 ## Next
-4. Always-on local dashboard with a password (for when Telegram is blocked)
+- The rest of Build 6: Shiba's scorecard, a decoy canary, `/drill` and a Sunday summary

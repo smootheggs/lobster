@@ -49,10 +49,19 @@ LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", DATA_DIR / "library"))  # /save docu
 # --- Web identity: sites like Wikipedia ask bots for a way to contact their owner ---
 CONTACT = os.getenv("CONTACT", "personal research bot")      # e.g. an email or your GitHub URL
 
+# --- Local web app (off until you set WEB_BIND and run set_password.py) ---
+WEB_BIND = os.getenv("WEB_BIND", "")                 # the tablet's hotspot or Tailscale IP; never 0.0.0.0
+WEB_PORT = int(os.getenv("WEB_PORT", "8787"))
+WEB_ALLOW_ALL = os.getenv("WEB_ALLOW_ALL", "0") == "1"   # only if you really mean every network
+WEB_HOSTS = [h.strip().lower() for h in os.getenv("WEB_HOSTS", "").split(",") if h.strip()]  # extra names, e.g. Tailscale
+WEB_PASSWORD_HASH = os.getenv("WEB_PASSWORD_HASH", "")   # written by set_password.py; never the password itself
+WEB_CERT = os.getenv("WEB_CERT", "")                 # optional HTTPS: certificate and key files
+WEB_KEY = os.getenv("WEB_KEY", "")
+
 # --- Schedules ---
 SPIDER_EVERY_HOURS = float(os.getenv("SPIDER_EVERY_HOURS", "6"))
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.12"
+VERSION = "2026-10-22.13"
 
 IDENTITY = (BASE_DIR / "identity.txt").read_text(encoding="utf-8")
