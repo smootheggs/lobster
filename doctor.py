@@ -157,6 +157,12 @@ def checks() -> list[tuple[bool, str]]:
             "Doesn't start by itself → see the README's start-up section")
     safely("Start-up", startup)
 
+    def time_zones():
+        import clock
+        add(clock.available(), "Time zones available (the clock answers \"what time is it in …\")",
+            "No time-zone data: the clock can't tell other cities' time → pkg install tzdata")
+    safely("Time zones", time_zones)
+
     def internet():
         import spider
         spider._online["at"] = 0.0

@@ -27,6 +27,7 @@ function h(tag, attrs = {}, ...kids) {
 const ICONS = {
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  down: '<path d="M12 5v14M5 12l7 7 7-7"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
   moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
@@ -301,9 +302,19 @@ function slothThinking() {
       h("img", { class: "swim-bob", src: "/sloth-lobster.svg", alt: "", width: "34", height: "28" })));
 }
 
-function item(m) {
+function item(m, latest = false) {
   if (m.t === "me") return h("div", { class: "me" }, m.text);
   if (m.t === "lob" && m.kind === "thinking") return slothThinking();
+  if (m.t === "lob" && latest && !m.kind && !m.flagged && !S.unreachable) {
+    // The latest plain answer can be marked wrong: it goes to a misses list and becomes a test.
+    return h("div", { class: "lob-wrap" }, h("div", { class: "lob" }, m.text),
+      h("button", { class: "wrong-link", type: "button", onclick: guard(async () => {
+        m.flagged = true;
+        paintThread();
+        const r = await api("/api/chat", { text: "/wrong" });
+        say(r.reply || "🐘 Noted.", "info");
+      }) }, "Wrong?"));
+  }
   if (m.t === "lob") return h("div", { class: `lob ${m.kind || ""}` }, m.text);
   if (m.t === "step") return h("div", { class: `step${m.live ? " live" : ""}`, icon: m.live ? "loader" : "check" }, m.text);
   if (m.t === "ask") return askCard(m);
@@ -492,7 +503,9 @@ function paintThread() {
   const el = document.getElementById("thread");
   if (!el) return;
   const atBottom = el.parentElement.scrollHeight - el.parentElement.scrollTop - el.parentElement.clientHeight < 80;
-  el.replaceChildren(...(S.thread.length ? S.thread.map(item) : [startView()]));
+  let latest = -1;
+  S.thread.forEach((m, i) => { if (m.t === "lob" && !m.kind) latest = i; else if (m.t === "me") latest = -1; });
+  el.replaceChildren(...(S.thread.length ? S.thread.map((m, i) => item(m, i === latest)) : [startView()]));
   if (atBottom) el.parentElement.scrollTop = el.parentElement.scrollHeight;
 }
 
@@ -923,9 +936,47 @@ function renderApp() {
         h("span", { class: "held-slot" }, heldChip()),
         dotButton()),
       h("div", { class: "reach-slot" }, reachBar()),
-      h("div", { class: "scroll" }, h("div", { class: "thread", id: "thread", "aria-live": "polite" })),
+      h("div", { class: "scroll-wrap" },
+        h("div", { class: "scroll" }, h("div", { class: "thread", id: "thread", "aria-live": "polite" })),
+        h("button", { class: "jump", type: "button", hidden: true, "aria-label": "Jump to the latest",
+          onclick: () => { const sc = document.querySelector(".scroll"); sc.scrollTo({ top: sc.scrollHeight, behavior: "smooth" }); },
+          icon: "down" })),
       composer())));
+  document.body.classList.add("in-app");
+  watchScroll();
   paintThread();
+}
+
+// --- The keyboard: the chat scrolls on its own; the box rests on the keyboard ---------------------
+// The page asks the browser to shrink above the keyboard (interactive-widget=resizes-content in
+// index.html). A browser that ignores that only shrinks its "visual" viewport and slides the whole
+// page up; then the app sizes itself to the space that's left and puts the page back.
+function fitToKeyboard() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement;
+  const covered = root.clientHeight - vv.height > 40 && Math.abs(vv.scale - 1) < 0.01;
+  if (covered) root.style.setProperty("--app-h", `${Math.round(vv.height)}px`);
+  else root.style.removeProperty("--app-h");
+  if (window.scrollY) window.scrollTo(0, 0);
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", fitToKeyboard);
+  window.visualViewport.addEventListener("scroll", fitToKeyboard);
+}
+
+// Reading the latest? Stay at the latest when the keyboard opens or a reply arrives. Scrolled up?
+// Stay put, with a small ↓ to come back.
+let stick = true;
+function watchScroll() {
+  const sc = document.querySelector(".scroll");
+  const jump = document.querySelector(".jump");
+  if (!sc || !jump) return;
+  const near = () => sc.scrollHeight - sc.scrollTop - sc.clientHeight < 80;
+  sc.addEventListener("scroll", () => { stick = near(); jump.hidden = stick; }, { passive: true });
+  if ("ResizeObserver" in window) {
+    new ResizeObserver(() => { if (stick) sc.scrollTop = sc.scrollHeight; }).observe(sc);
+  }
 }
 
 document.addEventListener("keydown", (e) => {

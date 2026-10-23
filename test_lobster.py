@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -124,6 +125,12 @@ def fake_chat(payload):
         tried = last.split("Already tried:", 1)[-1]
         return json.dumps({"searches": [tried.split(";")[0].strip(), "visit https://evil.example/more",
                                         f"Roman emperors {len(CALLS)}"]})
+    if "summary" in props and "Section question: Title safety" in last:   # bad card titles from a section
+        return json.dumps({"points": [{"fact": 99, "claim": "A fact that does not exist"},
+                                      {"fact": 1, "claim": "Read more at https://evil.example/kings"},
+                                      {"fact": 2, "claim": "The Wars of the Roses were fought from 1999 to 1487"},
+                                      {"fact": 3, "claim": "William the Conqueror became the first Norman king after"}],
+                           "summary": []})
     if "summary" in props:                     # one section: points + sentences, some of them bad
         facts = re.findall(r"^(\d+)\. (.*)$", last, re.M)
         if not facts:
@@ -274,7 +281,8 @@ class FakeWeb(BaseHTTPRequestHandler):
                        "application/json")
         elif u.path == "/v1/search":                      # weather: finding the city
             self._send(200, json.dumps({"results": [{"name": "San Francisco", "latitude": 37.77493,
-                                                     "longitude": -122.41942}]}).encode(), "application/json")
+                                                     "longitude": -122.41942, "timezone": "America/Los_Angeles"}]}).encode(),
+                       "application/json")
         elif u.path == "/v1/forecast":
             assert q["latitude"] == ["37.77"] and q["temperature_unit"][0] in ("fahrenheit", "celsius"), q
             self._send(200, json.dumps({"current": {"temperature_2m": 61.4, "weather_code": 2, "is_day": 0},
@@ -292,6 +300,7 @@ WEB = f"http://127.0.0.1:{web.server_port}"
 # (config.py only fills values that aren't set yet, so these win over your .env.)
 REAL_OLLAMA = os.environ.get("OLLAMA_URL") or "http://127.0.0.1:11434"
 TMP = Path(tempfile.mkdtemp(prefix="lobster-test-"))
+os.environ["LOBSTER_NO_ENV"] = "1"          # never read the owner's .env: tests see only what they set
 os.environ["OLLAMA_URL"] = f"http://127.0.0.1:{server.server_port}"
 os.environ["DATA_DIR"] = str(TMP / "data")
 os.environ["LIBRARY_DIR"] = str(TMP / "library")
@@ -922,12 +931,13 @@ def _():
               "sentence": "The Wars of the Roses were fought from 1455 to 1487 between Lancaster and York.", "source": "u"},
              {"id": 3, "text": "William the Conqueror became king after the Battle of Hastings in 1066.",
               "sentence": "William the Conqueror became king after the Battle of Hastings in 1066.", "source": "u"}]
-    topic, points = elephant.choose_points("English kings", facts)
+    points, _, _ = elephant.write_section("English kings", "Title safety", facts, config.MODEL, points=4, sentences=2)
     claims = dict(points)
-    assert "://" not in topic and all("://" not in c for c in claims.values()), points
+    assert all("://" not in c for c in claims.values()), points
     assert set(claims) <= {0, 1, 2}, points
     assert "1999" not in " ".join(claims.values()), "a garbled year survived into a card title"
     assert claims[0] == elephant.short_claim(facts[0]["text"]), "the link title should fall back to the sentence"
+    assert claims[2] == elephant.short_claim(facts[2]["text"]), "a title cut off mid-phrase was accepted"
     assert elephant._claim("William the Conqueror became the first Norman king after", facts[2]) == \
         elephant.short_claim(facts[2]["text"]), "a title cut off mid-phrase was accepted"
     assert not elephant._dangles(elephant.short_claim("The House of Plantagenet held the English throne from 1154, "
@@ -2368,7 +2378,7 @@ def _():
         if "seal.py" in code:
             assert code.startswith("echo"), f"update.sh runs the seal: {line}"
     assert "main()" in sh and 'main "$@"' in sh, "the script must be read whole before it runs"
-    assert "Tests failed: not restarting" in sh
+    assert "Tests failed: nothing was changed" in sh
 
 
 @test("the usage tally counts what you did this week from the existing logs")
@@ -2694,6 +2704,275 @@ def _():
         spider._weather.update(at=0.0, data=None)
 
 
+@test("the clock: time questions are worked out by code, right across time zones and daylight saving")
+def _():
+    import clock
+    old_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        if not clock.available():
+            # Without time-zone data the clock must say so plainly, never guess (doctor.py shows the fix).
+            assert "pkg install tzdata" in clock.answer("time", "hk") and clock.match("time in hk") == ("time", "hk")
+            print("     (this tablet has no time-zone data yet: pkg install tzdata; checked the plain message instead)")
+            return
+        at = 1792772400.0                               # 2026-10-23 16:20 UTC: Friday 9:20 AM in San Francisco
+        assert clock.match("What time is it in HK?") == ("time", "hk")
+        assert clock.answer("time", "hk", now=at) == \
+            "🦞 In Hong Kong it's 12:20 AM, Saturday 24 October (HKT, UTC+8). That's 15 hours ahead of you."
+        assert clock.answer(*clock.match("what time is it"), now=at) == "🦞 It's 9:20 AM, Friday 23 October (PDT, UTC-7)."
+        assert clock.answer(*clock.match("What's the date today?"), now=at) == "🦞 Today is Friday 23 October 2026."
+        summer, winter = 1782908400.0, 1796137200.0       # 2026-07-01 and 2026-12-01, noon UTC
+        assert "(CEST, UTC+2)" in clock.answer("time", "Frankfurt am Main", now=summer)
+        assert "(CET, UTC+1)" in clock.answer("time", "Frankfurt am Main", now=winter)
+        assert "In Zürich" in clock.answer(*clock.match("time in Zürich"), now=at)
+        for q in ("what time does the museum open", "what time did the Battle of Hastings start",
+                  "what time is it in Tokyo when it's 9 here", "is it time to go", "timeline of the Tudors"):
+            assert clock.match(q) is None, q
+        asked = []
+        def lookup(place):
+            asked.append(place)
+            return {"Lübeck": "Europe/Berlin", "Evilville": "../../etc/passwd"}.get(place)
+        assert "In Lübeck it's" in clock.answer("time", "Lübeck", now=at, lookup=lookup)
+        assert "don't know the time zone" in clock.answer("time", "Evilville", now=at, lookup=lookup)
+        clock.answer("time", "Tokyo", now=at, lookup=lookup)
+        assert asked == ["Lübeck", "Evilville"], "known places must not be looked up online"
+        assert "ask again when the tablet is online" in clock.answer("time", "Atlantis", now=at)
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
+
+
+@test("a place's time zone comes from the map service once, a name only, and is remembered")
+def _():
+    real = dict(spider.PROVIDERS)
+    spider.PROVIDERS["geocode"] = f"{WEB}/v1/search"
+    spider._online.update(at=time.time(), up=True)
+    (spider.CACHE_DIR / "timezones.json").unlink(missing_ok=True)
+    WEB_HITS.clear()
+    try:
+        assert spider.timezone_of("Palo Alto") == "America/Los_Angeles"
+        n = len(WEB_HITS)
+        assert spider.timezone_of("palo alto") == "America/Los_Angeles" and len(WEB_HITS) == n, "looked up twice"
+        for bad in ("https://evil.example/x", "<script>", "12345", "x" * 80):
+            assert spider.timezone_of(bad) is None, bad
+        assert len(WEB_HITS) == n, "a refused name still went out"
+        spider._online.update(at=time.time(), up=False)
+        assert spider.timezone_of("Somewhere Else") is None and len(WEB_HITS) == n, "offline, nothing goes out"
+    finally:
+        spider.PROVIDERS.clear()
+        spider.PROVIDERS.update(real)
+        spider._online.update(at=0.0, up=False)
+        (spider.CACHE_DIR / "timezones.json").unlink(missing_ok=True)
+
+
+@test("chat: the time comes from the clock (no model); a time the model states anyway is replaced")
+def _():
+    conversation.reset_session()
+    n = len(CALLS)
+    import clock
+    r = asyncio.run(conversation.handle("What time is it in Hong Kong?"))
+    expect = "In Hong Kong it's" if clock.available() else "pkg install tzdata"
+    assert expect in r["reply"] and len(CALLS) == n, (r, len(CALLS) - n)
+    real = conversation.think
+    async def guessing(history):
+        return {"action": "reply", "text": "", "reply": "It's 3:45 PM in Tokyo right now.", "tainted": False}
+    conversation.think = guessing
+    try:
+        r = asyncio.run(conversation.handle("so what time would it be for my friend in Tokyo now"))
+        assert r["reply"].endswith(conversation.NO_CLOCK) and "3:45" not in r["reply"], r
+        r = asyncio.run(conversation.handle("what time did the ferry leave on Saturday"))
+        assert "3:45" in r["reply"], "a question about a past time isn't the clock's business"
+    finally:
+        conversation.think = real
+        conversation.reset_session()
+
+
+@test("the model is told today's date (not the minute, so replies stay fast) and never to guess live facts")
+def _():
+    import brain
+    real_time = time.time
+    try:
+        time.time = lambda: 1792772400.0
+        a = brain._system_prompt([])
+        time.time = lambda: 1792772400.0 + 3000            # 50 minutes later, same day
+        b = brain._system_prompt([])
+    finally:
+        time.time = real_time
+    assert a == b, "the instructions changed within a day: Ollama can't reuse them"
+    assert "Today is" in a and "2026" in a and brain.LIVE_RULE in a
+    assert not re.search(r"\b\d{1,2}:\d{2}\b", a), "a clock time in the instructions changes every minute"
+    sent = []
+    real_chat = brain.ollama.chat
+    brain.ollama.chat = lambda model, messages, **kw: (sent.append(messages), json.dumps(
+        {"action": "reply", "text": "", "reply": "ok"}))[1]
+    try:
+        history = [{"role": "user", "content": "hello there"}]
+        brain._think_sync(history)
+    finally:
+        brain.ollama.chat = real_chat
+    assert "The tablet's clock:" in sent[0][-1]["content"], sent[0][-1]
+    assert history == [{"role": "user", "content": "hello there"}], "the clock note leaked into the saved chat"
+
+
+@test("/wrong: the last answer goes to a misses list in the work folder, with your correction, no links")
+def _():
+    conversation.reset_session()
+    conversation.MISSES.unlink(missing_ok=True)
+    assert "no answer in this chat" in conversation.command("/wrong")
+    s = conversation.load_session()
+    s["history"] += [{"role": "user", "content": "What time is it in HK?"},
+                     {"role": "assistant", "content": "It's 3 PM."}]
+    conversation.save_session(s)
+    reply = conversation.command("/wrong It's 12:20 AM there, see https://evil.example/x")
+    assert "Noted as wrong (1 so far)" in reply, reply
+    text = conversation.MISSES.read_text(encoding="utf-8")
+    assert "**You asked:** What time is it in HK?" in text and "**Sloth Lobster said:** It's 3 PM." in text, text
+    assert "12:20 AM" in text and "evil.example" not in text, text
+    assert str(conversation.MISSES).startswith(str(TMP)), "tests must not write into your real work folder"
+    assert "(2 so far)" in conversation.command("/wrong")
+    assert any(a.get("kind") == "miss_noted" for a in store.read_jsonl(shiba.AUDIT))
+    js = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+    assert '"/wrong"' in js, "the app has no Wrong? link"
+    conversation.reset_session()
+
+
+@test("tests never read your .env: LOBSTER_NO_ENV keeps your settings out")
+def _():
+    import subprocess
+    d = TMP / "envcheck"
+    d.mkdir(exist_ok=True)
+    for name in ("config.py", "store.py", "identity.txt"):
+        shutil.copy(Path(config.__file__).parent / name, d / name)
+    (d / ".env").write_text("WEATHER_PLACE=Nowhere\n", encoding="utf-8")
+    code = "import config; print(config.WEATHER_PLACE or '-')"
+    env = {k: v for k, v in os.environ.items() if k not in ("WEATHER_PLACE", "LOBSTER_NO_ENV")}
+    seen = subprocess.run([sys.executable, "-c", code], cwd=d, env=env, capture_output=True, text=True).stdout.strip()
+    hidden = subprocess.run([sys.executable, "-c", code], cwd=d, env=dict(env, LOBSTER_NO_ENV="1"),
+                            capture_output=True, text=True).stdout.strip()
+    assert seen == "Nowhere" and hidden == "-", (seen, hidden)
+    assert os.environ.get("LOBSTER_NO_ENV") == "1"
+
+
+def _fake_release(root, version, test_ok=True, web="v1", extra=None):
+    """A tiny stand-in package: the real update scripts, stub modules, a test that passes or fails."""
+    real = Path(__file__).parent
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    for f in ("update.sh", "swap.py", "start-sloth-lobster.sh"):
+        shutil.copy(real / "scripts" / f, root / "scripts" / f)
+    (root / "config.py").write_text(f'VERSION = "{version}"\n', encoding="utf-8")
+    (root / "test_lobster.py").write_text(f"import sys\nprint('{'1/1 passed' if test_ok else '0/1 passed'}')\n"
+                                          f"sys.exit({0 if test_ok else 1})\n", encoding="utf-8")
+    (root / "memory.py").write_text("from pathlib import Path\ndef backup():\n"
+                                    "    Path('data/backed-up').write_text('yes')\n"
+                                    "    return {'file': 'memory-test.db', 'facts': 3}\n", encoding="utf-8")
+    (root / "shiba.py").write_text("def seal_problem():\n    return ''\n", encoding="utf-8")
+    (root / "web.py").write_text(f"# sealed {web}\n", encoding="utf-8")
+    (root / "CHANGES.md").write_text(f"# Changes\n\n## {version}\n- Something better.\n", encoding="utf-8")
+    for name, text in (extra or {}).items():
+        (root / name).write_text(text, encoding="utf-8")
+
+
+def _run_update(home, *args):
+    import subprocess
+    import zipfile
+    # `python` must be the Python running these tests. Its own folder goes first on the PATH
+    # (Android won't run programs from the temporary folder, so no link is made there).
+    py_dir = str(Path(sys.executable).parent)
+    env = dict(os.environ, HOME=str(home), PATH=f"{py_dir}:{os.environ.get('PATH', '')}",
+               LOBSTER_NO_RESTART="1")
+    r = subprocess.run(["sh", str(home / "lobster" / "scripts" / "update.sh"), *args], env=env,
+                       capture_output=True, text=True, timeout=120)
+    return r.returncode, r.stdout + r.stderr
+
+
+def _zip_release(home, build):
+    import zipfile
+    dl = home / "storage" / "downloads"
+    dl.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(dl / "lobster-core.zip", "w") as z:
+        for p in sorted(build.rglob("*")):
+            if p.is_file():
+                z.write(p, "lobster/" + p.relative_to(build).as_posix())
+
+
+@test("updates: tested in their own folder first; a failure changes nothing; your data is never touched")
+def _():
+    home = TMP / "updhome1"
+    live = home / "lobster"
+    _fake_release(live, "1.0")
+    (live / "data").mkdir(parents=True, exist_ok=True)
+    (live / "data" / "notes.txt").write_text("mine", encoding="utf-8")
+    (live / ".env").write_text("TELEGRAM_TOKEN=secret", encoding="utf-8")
+    _fake_release(home / "build-bad", "2.0", test_ok=False)
+    _zip_release(home, home / "build-bad")
+    code, out = _run_update(home)
+    assert code == 1 and "nothing was changed" in out, out
+    assert 'VERSION = "1.0"' in (live / "config.py").read_text(), "a failed update replaced the running copy"
+    assert not (live / "data" / "backed-up").exists()
+
+    _fake_release(home / "build-good", "2.0", extra={"clock.py": "# new module\n", ".env": "TELEGRAM_TOKEN=evil"})
+    (home / "build-good" / "data").mkdir()
+    (home / "build-good" / "data" / "notes.txt").write_text("overwritten", encoding="utf-8")
+    _zip_release(home, home / "build-good")       # a package that (wrongly) carries a .env and data
+    code, out = _run_update(home)
+    assert code == 0 and "Installed 2.0" in out and "Something better" in out, out
+    assert 'VERSION = "2.0"' in (live / "config.py").read_text() and (live / "clock.py").exists()
+    assert (live / "data" / "backed-up").exists(), "memory wasn't backed up before the update"
+    assert (live / "data" / "notes.txt").read_text() == "mine" and (live / ".env").read_text() == "TELEGRAM_TOKEN=secret"
+    assert 'VERSION = "1.0"' in (home / ".lobster-prev" / "config.py").read_text(), "the previous version wasn't kept"
+    assert not (home / ".lobster-prev" / ".env").exists() and not (home / ".lobster-prev" / "data").exists()
+
+    code, out = _run_update(home, "--rollback")
+    assert code == 0 and "Back on 1.0" in out, out
+    assert 'VERSION = "1.0"' in (live / "config.py").read_text()
+    assert not (live / "clock.py").exists() and \
+        (home / ".lobster-prev" / "added-by-the-undone-update" / "clock.py").exists(), "added files must be moved aside"
+    assert (live / "data" / "notes.txt").read_text() == "mine" and (live / ".env").exists()
+
+
+@test("updates: when sealed files change, nothing changes until you've read them and run --apply")
+def _():
+    home = TMP / "updhome2"
+    live = home / "lobster"
+    _fake_release(live, "1.0", web="v1")
+    _fake_release(home / "build", "2.0", web="v2 with a new route")
+    _zip_release(home, home / "build")
+    code, out = _run_update(home)
+    assert code == 0 and "Sealed files change: web.py" in out and "--apply" in out and "python seal.py" in out, out
+    assert "diff ~/lobster/web.py ~/.lobster-next/lobster/web.py" in out, out
+    assert (live / "web.py").read_text() == "# sealed v1\n", "a sealed file changed before you read it"
+    code, out = _run_update(home, "--apply")
+    assert code == 0 and "Installed 2.0" in out, out
+    assert (live / "web.py").read_text() == "# sealed v2 with a new route\n"
+    code, out = _run_update(home, "--apply")
+    assert code == 1 and "Nothing tested to apply" in out, "a second --apply re-applied an old staging copy"
+
+
+@test("the start script says so when Sloth Lobster stops right away (e.g. waiting for your seal)")
+def _():
+    text = (Path(__file__).parent / "scripts" / "start-sloth-lobster.sh").read_text(encoding="utf-8")
+    assert "stopped right after starting" in text and "python seal.py" in text and "sleep 6" in text
+    upd = (Path(__file__).parent / "scripts" / "update.sh").read_text(encoding="utf-8")
+    assert "unzip -oq" not in upd, "update.sh must never unpack over the running copy"
+
+
+@test("the chat scrolls on its own: the keyboard shrinks the page instead of pushing the chat away")
+def _():
+    web_dir = Path(__file__).parent / "web"
+    html = (web_dir / "index.html").read_text(encoding="utf-8")
+    css = (web_dir / "style.css").read_text(encoding="utf-8")
+    js = (web_dir / "app.js").read_text(encoding="utf-8")
+    assert "interactive-widget=resizes-content" in html
+    assert "body.in-app { overflow: hidden" in css and ".scroll { flex: 1; min-height: 0; overflow-y: auto" in css
+    assert "var(--app-h, 100dvh)" in css and "visualViewport" in js and "function fitToKeyboard" in js
+    assert 'class: "jump"' in js and "ResizeObserver" in js
+    assert ".style.setProperty(" in js and "<style" not in js, "styles only through CSSOM (the page's CSP)"
+
+
 @test("Share to Sloth Lobster: opening /share saves nothing; only a tap in the app does")
 def _():
     manifest = json.loads((Path(__file__).parent / "web" / "manifest.webmanifest").read_text(encoding="utf-8"))
@@ -2978,10 +3257,10 @@ if bot:
         assert tele == other, f"Telegram {tele} vs other adapter {other}"
         conversation.reset_session()
 
-    @test("Telegram's command menu lists exactly the eleven commands")
+    @test("Telegram's command menu lists exactly the twelve commands")
     def _():
         assert [c for c, _ in bot.COMMANDS_MENU] == list(bot.COMMANDS) == \
-            ["research", "deep", "plan", "ask", "note", "save", "status", "stop", "new", "pause", "resume"]
+            ["research", "deep", "plan", "ask", "note", "save", "status", "stop", "new", "wrong", "pause", "resume"]
 
     @test("long briefs are split for Telegram between paragraphs, nothing lost")
     def _():

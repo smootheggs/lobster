@@ -28,6 +28,9 @@ A private research agent on the Legion Y700. It collects, files and guards knowl
 - **`/save <link>`:** keeps a document (an annual report, say) in your work folder with a receipt, and indexes its text for `/ask`.
 - **Reviews:** the question is *does the card say what its source says?* In the app, Cards to review shows one card at a time: the claim, the source sentence highlighted among its neighbours, and a link that opens the source at that sentence. Code checks each card first: other sources agreeing, sources disagreeing on a year, and reworded titles. Doubtful cards come first. Swipe right (matches) or left (doesn't), or tap Not sure / Not useful. In Obsidian, set `status` to `verified`, `wrong` or `set_aside`. The Elephant reads it back within 5 minutes. Wrong facts are never used again, and never deleted.
 
+- **The time and date:** "what time is it in Hong Kong?" (or any city, or just "what time is it") is answered by code in a moment: exact, with daylight saving, never guessed. The model is told today's date and never to guess the time, prices, scores, weather or news.
+- **`/wrong`** (or *Wrong?* under the latest answer in the app): that answer was wrong. It's added to `Sloth Lobster misses.md` in your work folder, with your correction if you add one (`/wrong it's 12:20 AM there`), and becomes a test in the next update.
+
 The other commands are `/plan <number>` (see or change a deep plan), `/status`, `/stop` (stops research and keeps what was read), `/new` (a fresh chat), `/pause` and `/resume`.
 
 ## The card guide (version 1; every note carries `card_version`, so it can grow)
@@ -162,10 +165,14 @@ Put a Kiwix Wikipedia file (e.g. `wikipedia_en_top_mini_2026-09.zim`) in `/stora
 
 ## Looking after it
 
-- **Check-up:** `python doctor.py` prints one line per part, ✅ or ⚠️ with the fix. It covers the seal, Ollama and models, app doors, certificate expiry, the vault, backups, space, offline Wikipedia, start-up and the internet. It only looks; it changes nothing and prints no secrets.
-- **Updating:** `sh ~/lobster/scripts/update.sh` takes the newest `lobster-core*.zip` from Downloads, unpacks it, runs the tests and restarts.
-  - If the tests fail, it stops.
-  - If sealed files changed, it stops and shows the seal command: sealing stays your signature.
+- **Check-up:** `python doctor.py` prints one line per part, ✅ or ⚠️ with the fix. It covers the seal, Ollama and models, app doors, certificate expiry, the vault, backups, space, offline Wikipedia, time zones, start-up and the internet. It only looks; it changes nothing and prints no secrets.
+- **Updating:** `sh ~/lobster/scripts/update.sh` takes the newest `lobster-core*.zip` from Downloads.
+  - It unpacks the new version into its own folder (`~/.lobster-next`) and tests it there. If any test fails, nothing changes.
+  - It backs up your memory, keeps the previous version in `~/.lobster-prev`, installs, restarts, and shows what changed.
+  - If sealed files change, it stops **before changing anything**, shows how to read each change, and gives one line to apply, seal (your signature) and restart.
+  - `sh ~/lobster/scripts/update.sh --rollback` puts the previous version back.
+  - Your data, `.env` and `.git` are never touched.
+- **Starting:** the start script checks a few seconds later that Sloth Lobster is really running, and if not, says why (for example, waiting for your seal).
 - **Certificates:** the app's certificate renews itself 30 days before it expires (checked hourly).
 - **Research scorecard:** `python research_bench.py` scores your finished briefs by code. It shows sub-questions answered, sentences that passed the citation check, sources and time. It's read-only. Run it after a week and compare.
 - **What you use:** `/status` and the app show this week's counts (research, asks, notes, reviews, shares, held notes). A short line arrives on Sunday evenings. These come from logs Sloth Lobster already keeps; nothing new is tracked.

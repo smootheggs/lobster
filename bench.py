@@ -40,7 +40,7 @@ CASES = [
     ("Explain in one sentence what a tariff is", "reply"),
 ]
 
-FACTS = [{"text": t} for t in (
+FACTS = [{"text": t, "sentence": t, "source": "bench"} for t in (
     "The Hanseatic League was a medieval commercial and defensive network of merchant guilds and market towns.",
     "Lübeck became the leading city of the League in the 14th century.",
     "The Treaty of Stralsund in 1370 marked the peak of the League's power.",
@@ -85,9 +85,9 @@ def run(model: str, threads: int, cases: list[tuple[str, str]]) -> dict:
         action, s, r, w = router_case(model, message, think)
         right += action == expected
         secs.append(s), reads.append(r), writes.append(w)
-    elephant.WRITER_MODEL = model
     t0 = time.monotonic()
-    _, points = elephant.choose_points("Why did the Hanseatic League decline?", FACTS)
+    points, _, _ = elephant.write_section("Why did the Hanseatic League decline?",
+                                          "What weakened the Hanseatic League?", FACTS, model, points=4, sentences=2)
     brief = time.monotonic() - t0
     return {"model": model, "threads": threads or "auto", "load": load, "right": right, "of": len(cases),
             "reply": sum(secs) / len(secs), "read": sum(reads) / len(reads), "write": sum(writes) / len(writes),
@@ -126,7 +126,7 @@ def main() -> None:
     best_right = max(r["right"] for r in rows)
     good = [r for r in rows if r["right"] >= best_right - 1]          # at most one more mistake than the best
     fast = min(good, key=lambda r: r["reply"])
-    writer = min([r for r in rows if r["points"] >= 5] or rows, key=lambda r: r["brief"])
+    writer = min([r for r in rows if r["points"] >= 3] or rows, key=lambda r: r["brief"])
     print(f"\n🦞 Fastest without getting dumber: {fast['model']} with threads={fast['threads']} "
           f"({fast['right']}/{fast['of']} right, {fast['reply']:.1f} s per reply).")
     print("   To use it, put these lines in .env and restart:")
@@ -136,7 +136,7 @@ def main() -> None:
     if fast["model"].startswith("qwen3"):
         print("   MODEL_THINK=off")
     if writer["model"] != fast["model"]:
-        print(f"   WRITER_MODEL={writer['model']}      # quickest brief with at least 5 good points")
+        print(f"   WRITER_MODEL={writer['model']}      # quickest section with at least 3 good cards")
     print("\nSend me this table and I'll check the choice with you before you switch.")
 
 

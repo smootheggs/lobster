@@ -8,6 +8,7 @@ before any write action runs.
 import asyncio
 import json
 
+import clock
 import memory
 import ollama
 from actions import ACTIONS
@@ -27,9 +28,18 @@ SCHEMA = {
 }
 
 
+# Things that change by the minute are never guessed: code answers the time, /research looks
+# up the rest. (Small models state stale or invented "facts" about now with full confidence.)
+LIVE_RULE = ("You have no clock, no internet and no live data. Never state the current time anywhere, "
+             "today's prices, scores, weather or news: say you can't know it, and suggest asking "
+             "\"what time is it in <city>\" for the time or /research for the rest.")
+
+
 def _system_prompt(facts: list[dict]) -> str:
     menu = "\n".join(f"- {name}: {spec['desc']}" for name, spec in MODEL_ACTIONS.items())
-    prompt = f"{IDENTITY}\n\nAvailable actions:\n{menu}\n"
+    # The date only (it changes once a day), so the start of the prompt stays the same between
+    # messages and Ollama can reuse it: replies stay fast. The time goes into your message.
+    prompt = f"{IDENTITY}\n\n{clock.today_line()} {LIVE_RULE}\n\nAvailable actions:\n{menu}\n"
     owner = [f["text"] for f in facts if f["tag"] == "owner"]
     web = [f"{f['text']} (source: {f['source']}, {f['added']})" for f in facts if f["tag"] == "web"]
     if owner:
@@ -49,7 +59,8 @@ def _think_sync(history: list[dict]) -> dict:
         facts = memory.search(question, k=6)
     except Exception:          # memory empty or embed model missing: carry on without it
         facts = []
-    messages = [{"role": "system", "content": _system_prompt(facts)}] + history
+    latest = dict(history[-1], content=f"{history[-1]['content']}\n\n{clock.now_note()}")
+    messages = [{"role": "system", "content": _system_prompt(facts)}] + history[:-1] + [latest]
     content = ollama.chat(MODEL, messages, schema=SCHEMA, keep_alive=CHAT_KEEP_ALIVE, purpose="chat")
     try:
         decision = json.loads(content)

@@ -18,12 +18,13 @@ import json
 import re
 import time
 
+import clock
 import research as jobs
 import shiba
 import spider
 from actions import run_action
 from brain import think
-from config import DATA_DIR
+from config import DATA_DIR, VERSION, WORK_DIR
 from store import write_atomic
 
 SESSION = DATA_DIR / "session.json"
@@ -107,7 +108,41 @@ async def handle(text: str, busy: str | None = None) -> dict:
 
 # Typed commands are handled by code, never guessed at by the model.
 COMMAND_HELP = ("Commands: /research <question>, /deep <question>, /ask <question>, /note <text>, /save <link>, "
-                "/status, /stop, /new, /pause, /resume")
+                "/wrong (that answer was wrong), /status, /stop, /new, /pause, /resume")
+NO_CLOCK = ("🦞 I can't read a clock in my head. Ask me “what time is it in Hong Kong” (or any city) "
+            "and I'll work it out exactly.")
+MISSES = WORK_DIR / "Sloth Lobster misses.md"
+
+
+def wrong(correction: str = "") -> str:
+    """/wrong: the last answer was wrong. It's written to a list in your work folder (which syncs
+    to Drive), so it can become a test and get fixed for good. Nothing else changes."""
+    s = load_session()
+    hist = s["history"]
+    last = next((i for i in range(len(hist) - 1, -1, -1) if hist[i]["role"] == "assistant"), None)
+    if last is None:
+        return "🐘 There's no answer in this chat to mark yet."
+    asked = next((hist[i]["content"] for i in range(last - 1, -1, -1) if hist[i]["role"] == "user"), "")
+    correction = " ".join(re.sub(r"\S*(?:https?://|www\.)\S*", "", correction).split())[:500]
+    entry = (f"\n## {time.strftime('%Y-%m-%d %H:%M')} · version {VERSION}\n"
+             f"- **You asked:** {_quote(asked)}\n- **Sloth Lobster said:** {_quote(hist[last]['content'])}\n"
+             + (f"- **What's right:** {_quote(correction)}\n" if correction else ""))
+    MISSES.parent.mkdir(parents=True, exist_ok=True)
+    new = not MISSES.exists()
+    with open(MISSES, "a", encoding="utf-8") as f:
+        if new:
+            f.write("# Sloth Lobster misses\n\nAnswers you marked wrong with /wrong or the app's Wrong? link. "
+                    "Each one becomes a test in the next update.\n")
+        f.write(entry)
+    shiba.audit("miss_noted", chars=len(asked))
+    n = sum(1 for line in MISSES.read_text(encoding="utf-8").splitlines() if line.startswith("## "))
+    return (f"🐘 Noted as wrong ({n} so far), in “{MISSES.name}” in your work folder. "
+            + ("Thanks for the correction. " if correction else "Add what's right with /wrong <the right answer>. ")
+            + "It'll become a test in the next update.")
+
+
+def _quote(text: str) -> str:
+    return " ".join(str(text).split())[:800] or "(nothing)"
 
 
 def command(text: str) -> str | None:
@@ -122,6 +157,8 @@ def command(text: str) -> str | None:
         return simple[name](arg)
     if name == "plan":
         return plan_command(arg)
+    if name == "wrong":
+        return wrong(arg)
     if name == "stop":
         return stop()
     if name == "new":
@@ -182,6 +219,9 @@ def quick(text: str) -> tuple[str, str] | None:
         return "reply", ("🦞 I can research a question (/research), answer from your vault (/ask), "
                          "save a note exactly as you write it (/note) and keep a document (/save). "
                          "Or just talk to me. " + COMMAND_HELP)
+    when = clock.match(text)                   # the time and date: worked out by code, never guessed
+    if when is not None:
+        return "reply", clock.answer(*when, lookup=spider.timezone_of)
     t = text.strip().rstrip("?").strip()
     m = RESEARCH_START.match(t)
     if m:
@@ -217,6 +257,10 @@ async def _handle(text: str, busy: str | None) -> dict:
         save_session(s)
         return {"reply": f"{prefix}🦞 My model is napping ({type(e).__name__}). "
                          "/note, /ask, /research, /save and /status still work.", "code": None}
+
+    if clock.model_guessed_time(text, decision.get("reply", "")):
+        # Backstop: a time question reached the model and it stated a time. It has no clock.
+        decision.update(action="reply", text="", reply=NO_CLOCK)
 
     # Taint is sticky: web facts from earlier turns are still in the conversation.
     if decision["tainted"]:

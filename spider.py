@@ -276,6 +276,37 @@ def _place(query: str) -> dict | None:
     return place
 
 
+def timezone_of(name: str) -> str | None:
+    """A place's time zone (e.g. "Europe/Berlin") from the map service, for the clock. Only the
+    place name goes out; answers are remembered on the tablet. None when unknown or offline."""
+    name = " ".join(str(name or "").split())
+    if not name or not PLACE_OK.match(name) or "://" in name:
+        return None
+    path = CACHE_DIR / "timezones.json"
+    try:
+        known = json.loads(path.read_text(encoding="utf-8"))
+        known = known if isinstance(known, dict) else {}
+    except (OSError, ValueError):
+        known = {}
+    key = name.lower()
+    if key in known:
+        return known[key] or None
+    if not online():
+        return None
+    try:
+        page = fetch(f"{PROVIDERS['geocode']}?{urlencode({'name': name, 'count': 1})}", _opener(), robots=False)
+        hits = json.loads(page["content"]).get("results") or []
+        tz = str(hits[0].get("timezone", "")) if hits else ""
+    except Exception:
+        return None                                  # not remembered: try again next time
+    if not re.fullmatch(r"[A-Za-z_]+(?:/[A-Za-z0-9_+-]+){0,2}", tz):
+        tz = ""
+    known[key] = tz
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, json.dumps(dict(list(known.items())[-500:])))
+    return tz or None
+
+
 def weather(max_age: float = 1800) -> dict | None:
     """{"icon", "temp", "high", "low", "text", "place", "unit"} for the chosen place, or None."""
     chosen = weather_settings()

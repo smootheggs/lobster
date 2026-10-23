@@ -58,6 +58,7 @@ COMMANDS_MENU = [                  # what Telegram shows when you type /
     ("status", "What every part is doing right now"),
     ("stop", "Stop the running research and cancel waiting jobs"),
     ("new", "Start a fresh chat"),
+    ("wrong", "That answer was wrong: noted, to become a test"),
     ("pause", "Freeze every write"),
     ("resume", "Unfreeze"),
 ]
@@ -308,8 +309,14 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(conversation.command(update.message.text or "/") or conversation.COMMAND_HELP)
 
 
+@owner_only
+async def cmd_wrong(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(await asyncio.to_thread(conversation.wrong, " ".join(ctx.args or [])))
+
+
 COMMANDS = {"research": cmd_research, "deep": cmd_deep, "plan": cmd_plan, "ask": cmd_ask, "note": cmd_note, "save": cmd_save,
-            "status": cmd_status, "stop": cmd_stop, "new": cmd_new, "pause": cmd_pause, "resume": cmd_resume}
+            "status": cmd_status, "stop": cmd_stop, "new": cmd_new, "wrong": cmd_wrong, "pause": cmd_pause,
+            "resume": cmd_resume}
 
 
 # --- The schedule ------------------------------------------------------------------------

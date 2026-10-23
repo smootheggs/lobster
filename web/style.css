@@ -46,9 +46,10 @@ a:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
 
 /* --- Shell ---------------------------------------------------------------------------- */
-.app { height: 100dvh; display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.app { height: var(--app-h, 100dvh); display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr; }
 .sidebar { display: none; }
-.chat { display: flex; flex-direction: column; min-width: 0; height: 100dvh; }
+.chat { display: flex; flex-direction: column; min-width: 0; height: var(--app-h, 100dvh); }
+body.in-app { overflow: hidden; overscroll-behavior: none; }   /* only the chat scrolls, never the page */
 
 .topbar {
   display: flex; align-items: center; gap: 8px;
@@ -75,7 +76,20 @@ a:hover { text-decoration: underline; }
 .held-slot:empty { display: none; }
 
 /* --- Thread -------------------------------------------------------------------------- */
-.scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; }
+.scroll-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.jump {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); width: 36px; height: 36px;
+  display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line-strong);
+  background: var(--raised); color: var(--text); box-shadow: 0 2px 10px rgba(0, 0, 0, .5);
+}
+.jump[hidden] { display: none; }
+.jump svg { width: 18px; height: 18px; }
+.lob-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.wrong-link {
+  background: none; border: 0; padding: 2px 0; font-size: .75rem; color: var(--faint); cursor: pointer;
+}
+.wrong-link:hover, .wrong-link:focus-visible { color: var(--muted); }
 .thread {
   max-width: var(--col); margin: 0 auto; padding: 8px var(--gutter) 24px;
   display: flex; flex-direction: column; gap: 14px;
@@ -229,7 +243,7 @@ a:hover { text-decoration: underline; }
 @media (min-width: 840px) {
   .app { grid-template-columns: var(--sidebar) minmax(0, 1fr); }
   .sidebar {
-    display: block; height: 100dvh; overflow-y: auto; border-right: 1px solid var(--line);
+    display: block; height: var(--app-h, 100dvh); overflow-y: auto; border-right: 1px solid var(--line);
     padding: calc(env(safe-area-inset-top) + 12px) 12px 16px;
   }
   .topbar .menu { display: none; }
@@ -241,7 +255,7 @@ a:hover { text-decoration: underline; }
 @media (min-width: 1200px) {
   .app.reading { grid-template-columns: var(--sidebar) minmax(0, 1fr) var(--reader); }
   .app.reading .reader {
-    position: static; width: auto; height: 100dvh; border-left: 1px solid var(--line); inset: auto;
+    position: static; width: auto; height: var(--app-h, 100dvh); border-left: 1px solid var(--line); inset: auto;
   }
   .app.reading .scrim.for-reader { display: none; }
 }

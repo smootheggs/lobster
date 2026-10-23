@@ -23,7 +23,9 @@ def _load_env(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-_load_env(ENV_FILE)
+# The tests set LOBSTER_NO_ENV=1: your own settings must never change what a test sees.
+if os.environ.get("LOBSTER_NO_ENV") != "1":
+    _load_env(ENV_FILE)
 
 # --- Telegram ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")          # from @BotFather
@@ -96,7 +98,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-23.30.1"
+VERSION = "2026-10-23.31.1"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")
