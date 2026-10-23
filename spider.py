@@ -21,7 +21,8 @@ import urllib.robotparser
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 import shiba
-from config import CACHE_DIR, CONTACT, LIBRARY_DIR, PROXY
+import zim
+from config import CACHE_DIR, CONTACT, KIWIX_DIR, LIBRARY_DIR, PROXY
 from store import write_atomic
 
 MAX_BYTES = 2_000_000          # pages: anything longer is cut
@@ -198,6 +199,24 @@ def online(max_age: float = 60) -> bool:
         up = False
     _online.update(at=time.time(), up=up)
     return up
+
+
+# --- Offline Wikipedia (a Kiwix file on the tablet; no network, no server) ---------------
+
+def offline_available() -> bool:
+    return bool(zim.library(KIWIX_DIR))
+
+
+def warm_offline() -> None:
+    """Build the title index of each Kiwix file ahead of time, so the first offline research is quick."""
+    for z in zim.library(KIWIX_DIR):
+        z.index(CACHE_DIR)
+
+
+def offline_wikipedia(phrases: list[str], limit: int, should_stop=None) -> dict:
+    """Like wikipedia(), but read from the Kiwix file: titles matched by code, never the model."""
+    return zim.articles(KIWIX_DIR, phrases, limit, per_phrase=PER_SEARCH, should_stop=should_stop,
+                        cache_dir=CACHE_DIR)
 
 
 def inbox_count() -> int:

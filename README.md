@@ -15,7 +15,7 @@ A private research agent on the Legion Y700. It collects, files and guards knowl
 - **`/note <text>`:** saved exactly as typed: a trusted fact, and a note in your vault inbox.
 - **`/ask <question>`:** answers from your vault only, your notes first, each web fact with its source. No web, no model, under a second.
 - **`/save <link>`:** keeps a document (an annual report, say) in your work folder with a receipt, and indexes its text for `/ask`.
-- **Reviews:** set a card's `status` to `verified` or `wrong` in Obsidian, or tap Mark verified or Mark wrong in the app. The Elephant reads it back within 5 minutes. Wrong facts are never used again, and never deleted.
+- **Reviews:** the question is *does the card say what its source says?* In the app, Cards to review shows one card at a time: the claim, the source sentence highlighted among its neighbours, and a link that opens the source at that sentence. Code checks each card first: other sources agreeing, sources disagreeing on a year, and reworded titles. Doubtful cards come first. Swipe right (matches) or left (doesn't), or tap Not sure / Not useful. In Obsidian, set `status` to `verified`, `wrong` or `set_aside`. The Elephant reads it back within 5 minutes. Wrong facts are never used again, and never deleted.
 
 The other commands are `/status`, `/stop` (stops research and keeps what was read), `/new` (a fresh chat), `/pause` and `/resume`.
 
@@ -136,3 +136,13 @@ One-time setup:
 3. On the S25, with the hotspot on: open `https://<static IP>:8787` and install it as "Sloth Lobster (offline)".
 
 Then going offline is two taps: hotspot on, open the app. The door opens within about 15 seconds. If an app can't reach the tablet, its bar offers "Try hotspot" or "Try Tailscale".
+
+## Offline Wikipedia (Kiwix files)
+
+Put a Kiwix Wikipedia file (e.g. `wikipedia_en_top_mini_2026-09.zim`) in `/storage/emulated/0/Kiwix`. The Spider reads it straight from disk: no server, no port, no network.
+- **Offline, or when the internet drops mid-research:** research reads the offline copy instead of waiting.
+- **Online:** live Wikipedia stays first (fresher, and it has every article).
+- **Finding articles:** search words are matched to article titles and redirects by code, never by the model. The text then goes through the same cleaning and Shiba filter as web pages.
+- **Marking:** briefs mark offline sources "(offline copy)", and their source pages carry `copy:` with the file's name.
+- **Damaged or crafted files** are refused or skipped: offsets are checked, unpacked blocks are capped, and redirects stop after 5.
+- **Check it on the tablet:** `python zim.py "Hanseatic League"`

@@ -28,7 +28,7 @@ from config import DATA_DIR
 from store import write_atomic
 
 SESSION = DATA_DIR / "session.json"
-HISTORY_TURNS = 10      # short memory keeps a small model focused
+HISTORY_TURNS = 6       # short memory keeps a small model focused, and its prompt quick to read
 TAINT_MEMORY = 6        # after seeing web facts, stay cautious for this many turns
 _turn = asyncio.Lock()  # Telegram and the web app take turns, so neither overwrites the other's session
 
@@ -145,14 +145,64 @@ def _research_fits(message: str, question: str) -> bool:
     return bool(_topic_words(message) & _topic_words(question))
 
 
+# --- Instant replies: common messages answered by code, in milliseconds -------------------
+# (Home Assistant's local assistant works the same way: match plain phrases first, ask the
+# model only for real conversation.) Everything here only reads, or goes through the same
+# functions as the typed commands, so Shiba's checks are unchanged.
+
+def _norm(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+
+
+GREETINGS = {"hi", "hello", "hey", "hallo", "moin", "morning", "good morning", "good afternoon",
+             "good evening", "evening", "hi there", "hello there", "hey there", "yo"}
+THANKS = {"thanks", "thank you", "thx", "ty", "danke", "cheers", "thanks a lot", "thank you very much", "great thanks"}
+HELP = {"help", "what can you do", "what can you do for me", "commands", "how does this work"}
+RESEARCH_START = re.compile(r"^(?:please\s+)?(?:research|look up|look into|find out about|dig into)\s+(?!shows|suggests|says|has|is|was|were|are)(.{3,})$", re.I | re.S)
+ASK_START = re.compile(r"^(?:what do (?:i|we) know about|what's in my vault about|what is in my vault about|"
+                       r"search my vault for|do i have (?:any )?notes on)\s+(.{2,})$", re.I | re.S)
+
+
+def quick(text: str) -> tuple[str, str] | None:
+    """(kind, reply) for messages that need no model, else None."""
+    n = _norm(text)
+    if n in GREETINGS:
+        return "reply", "🦞 Hello. What should we look into?"
+    if n in THANKS:
+        return "reply", "🦞 Anytime."
+    if n in HELP:
+        return "reply", ("🦞 I can research a question (/research), answer from your vault (/ask), "
+                         "save a note exactly as you write it (/note) and keep a document (/save). "
+                         "Or just talk to me. " + COMMAND_HELP)
+    t = text.strip().rstrip("?").strip()
+    m = RESEARCH_START.match(t)
+    if m:
+        return "research", research(m.group(1))
+    m = ASK_START.match(t)
+    if m:
+        return "ask", ask(m.group(1))
+    return None
+
+
 async def _handle(text: str, busy: str | None) -> dict:
+    prefix = f"{busy}\n\n" if busy else ""
     typed = command(text)
     if typed is not None:
-        return {"reply": (f"{busy}\n\n" if busy else "") + typed, "code": None, "action": "command"}
+        return {"reply": prefix + typed, "code": None, "action": "command"}
+    fast = await asyncio.to_thread(quick, text)
+    if fast is not None:
+        kind, reply = fast
+        s = load_session()
+        hello = greeting(s) if kind == "reply" else ""
+        # /ask results stay out of the model's memory, like before; a short marker keeps the thread.
+        s["history"] += [{"role": "user", "content": text},
+                         {"role": "assistant", "content": reply if kind != "ask" else "(answered from the vault)"}]
+        s["history"] = s["history"][-HISTORY_TURNS:]
+        save_session(s)
+        return {"reply": prefix + hello + reply, "code": None, "action": kind}
     s = load_session()
     s["history"].append({"role": "user", "content": text})
     s["history"] = s["history"][-HISTORY_TURNS:]
-    prefix = f"{busy}\n\n" if busy else ""
     try:
         decision = await think(s["history"])
     except Exception as e:
@@ -247,7 +297,9 @@ def research(text: str) -> str:
         return _blocked("research", reason)
     reply = run_action("research", text)
     if not spider.online() and not shiba.paused():
-        reply += "\nWe're offline, so it waits here and runs by itself once we're back online."
+        reply += ("\nWe're offline, so the Spider reads your offline Wikipedia copy instead."
+                  if spider.offline_available() else
+                  "\nWe're offline, so it waits here and runs by itself once we're back online.")
     return reply
 
 

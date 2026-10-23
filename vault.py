@@ -174,15 +174,18 @@ def write_card(card_id: str, title: str, claim: str, evidence: str, source_title
 
 
 def write_source(source_id: str, title: str, url: str, fetched: str, card_titles: list[str],
-                 fingerprint: str = "", published: str = "") -> Path:
+                 fingerprint: str = "", published: str = "", copy: str = "") -> Path:
     props = {"id": source_id, "type": "source", "status": "unreviewed", "made_by": "lobster",
              "url": url, "fetched": fetched[:10], "created": today(), "card_version": CARD_VERSION}
     if published:
         props["published"] = published
     if fingerprint:
         props["sha256"] = fingerprint
+    if copy:
+        props["copy"] = copy                     # read from an offline Kiwix file, not the live page
     cited = "\n".join(f"- {link(t)}" for t in card_titles) or "- (no cards yet)"
-    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\nCollected by the Spider from <{url}>. "
+    origin = f"from the offline copy {copy} (the live page is <{url}>)" if copy else f"from <{url}>"
+    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\nCollected by the Spider {origin}. "
             f"This page is the record of what was read; it is never edited afterwards.\n\n"
             f"## Cards from this source\n{cited}\n")
     return _write_new(title, frontmatter(props) + body)

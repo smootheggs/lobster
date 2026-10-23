@@ -33,6 +33,7 @@ import ollama
 import research
 import shiba
 import spider
+import zim
 import web
 from store import timing_summary
 
@@ -209,16 +210,25 @@ def status_lines() -> list[str]:
     secs = t.get("research")
     speed = "" if secs is None else f" · research takes ~{secs:.0f} s" if secs < 90 else f" · research takes ~{secs / 60:.1f} min"
     return [
-        f"🧠 Model: {'running' if ollama.alive() else 'DOWN'} ({config.MODEL})",
+        f"🧠 Model: {'running' if ollama.alive() else 'DOWN'} ({config.MODEL})" + speed_note(),
         f"🐘 Memory: {s['owner']} of your facts, {s['web']} web facts · {s['cards']} cards, {s['unreviewed']} to review",
         f"🕷️ {len(research.pending())} research job(s) waiting{speed}",
         f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'on guard'}, {shiba.blocks_last_day()} blocked in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (backups still run daily)'}",
         now_line(),
         f"🌐 Internet: {'online' if spider.online() else 'OFFLINE (research waits in the queue)'}",
+        *([f"📚 Offline Wikipedia: {', '.join(z.copy for z in zim.library(config.KIWIX_DIR))}"]
+          if spider.offline_available() else []),
         *door_lines(),
         f"💾 Last backup: {memory.last_backup() or 'never'} · version {config.VERSION}",
     ]
+
+
+def speed_note() -> str:
+    sp = ollama.speed("chat")
+    if not sp:
+        return ""
+    return f" · replies ≈ {sp['seconds']} s (reading {sp['read_s']} s, writing {sp['write_s']} s)"
 
 
 def door_lines() -> list[str]:
@@ -286,7 +296,7 @@ async def run_digest(bot=None, background: bool = False) -> str:
         return ""
     stop = (lambda: bool(research.pending())) if background else None
     async with digest_lock:
-        state["now"] = "Elephant indexing saved documents"
+        state["now"] = "🐘 Indexing saved documents"
         try:
             r = await asyncio.to_thread(elephant.digest, None, None, stop, True)
         finally:
@@ -307,24 +317,27 @@ async def run_research_jobs(app) -> None:
             if not waiting:
                 break
             job = waiting[0]
-            if not await asyncio.to_thread(spider.online):
-                state["now"] = f"offline: {len(waiting)} research job(s) wait for the internet"
+            if not await asyncio.to_thread(spider.online) and not await asyncio.to_thread(spider.offline_available):
+                state["now"] = f"🦞 Offline: {len(waiting)} research job(s) wait for the internet"
                 return                               # tried again every 15 s; runs by itself when back
             research.STOP.clear()
             send = app.bot.send_message
             loop = asyncio.get_running_loop()
 
             def say(text, job_id=job["id"]):
+                who, _, rest = text.partition(" ")      # "🕷️ Out collecting: …" -> the app's live step
+                if who and rest and not who.isalnum():
+                    state["now"] = f"{who} Research #{job_id}: {rest[:1].lower()}{rest[1:]}"
                 asyncio.run_coroutine_threadsafe(send(config.ALLOWED_USER_ID, f"#{job_id} {text}"), loop)
 
             def page_done(i, n, url, job_id=job["id"]):
-                state["now"] = f"research #{job_id}: read {i} of {n} articles"
+                state["now"] = f"🐘 Research #{job_id}: reading {i} of {n} articles"
                 asyncio.run_coroutine_threadsafe(
                     send(config.ALLOWED_USER_ID, f"🐘 #{job_id}: {i}/{n} read ({_title(url)})"), loop)
 
             await send(config.ALLOWED_USER_ID, f"🕷️ Researching #{job['id']}: {job['question']}")
             async with digest_lock:                  # waits for a running document digest
-                state["now"] = f"research #{job['id']}: collecting"
+                state["now"] = f"🕷️ Research #{job['id']}: collecting"
                 try:
                     r = await asyncio.to_thread(research.run_job, job, say, page_done)
                 finally:
@@ -350,6 +363,10 @@ async def run_research_jobs(app) -> None:
 
 async def background(app: Application) -> None:
     await asyncio.sleep(20)
+    try:
+        await asyncio.to_thread(spider.warm_offline)      # once: offline Wikipedia's title index
+    except Exception:
+        log.exception("Couldn't prepare offline Wikipedia")
     while True:
         try:
             await run_research_jobs(app)

@@ -1,6 +1,6 @@
 // Keeps the app's own files on the phone so it opens instantly.
 // Your data (/api, /library) is never cached: it always comes fresh from the tablet.
-const CACHE = "lobster-shell-8";
+const CACHE = "lobster-shell-10";
 const SHELL = ["/", "/app.js", "/style.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/sloth-lobster.svg", "/ripple.svg"];
 
 self.addEventListener("install", (e) => {
@@ -19,7 +19,8 @@ self.addEventListener("fetch", (e) => {
   if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/library/")) return;
   // Shell files: answer from the cache, refresh it in the background.
   e.respondWith(caches.open(CACHE).then(async (cache) => {
-    const cached = await cache.match(e.request);
+    // Opening the app (also from the Share menu, /share?...) works offline from the cached page.
+    const cached = await cache.match(e.request.mode === "navigate" ? "/" : e.request);
     const fresh = fetch(e.request).then((r) => { if (r.ok) cache.put(e.request, r.clone()); return r; })
       .catch(() => cached);
     return cached || fresh;

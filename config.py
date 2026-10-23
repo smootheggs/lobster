@@ -32,9 +32,16 @@ PROXY = os.getenv("PROXY", "")                             # e.g. http://127.0.0
 
 # --- Local models (Ollama) ---
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL = os.getenv("MODEL", "qwen2.5:3b")                  # chat + fact extraction
+MODEL = os.getenv("MODEL", "qwen2.5:3b")                  # deciding what you want + chat replies
+WRITER_MODEL = os.getenv("WRITER_MODEL", "") or MODEL      # research plans and briefs (can be a bigger model)
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
-CHAT_KEEP_ALIVE = os.getenv("CHAT_KEEP_ALIVE", "5m")      # how long the model stays in RAM after a chat
+CHAT_KEEP_ALIVE = os.getenv("CHAT_KEEP_ALIVE", "24h")     # keep the model loaded: no cold start after a pause
+MODEL_THREADS = int(os.getenv("MODEL_THREADS", "0") or 0)  # 0: Ollama decides; bench.py finds the fastest
+MODEL_CTX = 4096          # one window size for every call: changing it makes Ollama reload the model
+MODEL_THINK = os.getenv("MODEL_THINK", "").lower()          # "off" turns off thinking (Qwen3); else unset
+
+# --- Offline Wikipedia: Kiwix .zim files (wikipedia_<lang>_..._YYYY-MM.zim) read straight from disk ---
+KIWIX_DIR = Path(os.getenv("KIWIX_DIR", "/storage/emulated/0/Kiwix"))
 
 # --- Storage ---
 # Sloth Lobster's private working state stays on the tablet's internal storage.
@@ -80,7 +87,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.24"
+VERSION = "2026-10-22.28"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")

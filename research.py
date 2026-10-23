@@ -116,7 +116,7 @@ def plan(question: str) -> dict:
     try:
         reply = ollama.chat(MODEL, [{"role": "system", "content": PLAN_SYSTEM},
                                     {"role": "user", "content": question}],
-                            schema=PLAN_SCHEMA, keep_alive=CHAT_KEEP_ALIVE)
+                            schema=PLAN_SCHEMA, keep_alive=CHAT_KEEP_ALIVE, purpose="plan")
         data = json.loads(reply)
         searches = [clean_phrase(s) for s in data.get("searches", []) if isinstance(s, str)]
         needs_news = data.get("needs_news") is True
@@ -142,15 +142,26 @@ def run_job(job: dict, say=lambda text: None, progress=None) -> dict:
             return {"status": "stopped"}
         say(f"🕷️ Out collecting: {', '.join(p['searches'])}")
         with timed("collect"):
-            got = spider.wikipedia(p["searches"], MAX_CANDIDATES, should_stop=STOP.is_set)
+            offline = not spider.online() and spider.offline_available()
+            if not offline:
+                got = spider.wikipedia(p["searches"], MAX_CANDIDATES, should_stop=STOP.is_set)
+                if (not got["articles"] and got["network_errors"] == len(p["searches"])
+                        and spider.offline_available()):
+                    offline = True                       # the internet dropped: read the offline copy
+            if offline:
+                phrases = list(dict.fromkeys(p["searches"] + [q]))
+                got = spider.offline_wikipedia(phrases, MAX_CANDIDATES, should_stop=STOP.is_set)
+                for a in got["articles"]:
+                    a["text"] = elephant.html_to_text(a.pop("html"))
             kept, skipped = elephant.rank(q, got["articles"])
+            copies = {a["url"]: a["copy"] for a in kept if a.get("copy")}
             urls = []
             for a in kept:
                 spider.to_inbox({"url": a["url"], "title": a["title"], "fetched_at": a["fetched_at"],
                                  "content_type": "text/plain", "content": f"{a['title']}. {a['text']}",
                                  "sha256": a["sha256"]}, origin="research", job=job["id"], question=q)
                 urls.append(a["url"])
-            if p["needs_news"] and len(urls) < elephant.MAX_PAGES:
+            if p["needs_news"] and not offline and len(urls) < elephant.MAX_PAGES:
                 try:
                     page = spider.news(clean_phrase(q))
                     spider.to_inbox(page, origin="research", job=job["id"], question=q)
@@ -167,11 +178,12 @@ def run_job(job: dict, say=lambda text: None, progress=None) -> dict:
             mark_done(job["id"], "nothing found")
             return {"status": "nothing", "failed": got["failed"]}
         skipped_note = f" Skipped as off-topic: {', '.join(a['title'] for a in skipped)}." if skipped else ""
-        say(f"🕷️ Back with {len(urls)} article{'s' if len(urls) != 1 else ''}.{skipped_note} Handing them to the Elephant.")
+        where = " from your offline Wikipedia" if offline else ""
+        say(f"🕷️ Back with {len(urls)} article{'s' if len(urls) != 1 else ''}{where}.{skipped_note} Handing them to the Elephant.")
         r = elephant.digest(job=job["id"], progress=progress, should_stop=STOP.is_set, unload=False)
         if r["stopped"] or STOP.is_set():
             return {"status": "stopped", "facts": r["facts"]}
-        b = elephant.brief(job, urls)
+        b = elephant.brief(job, urls, copies)
     mark_done(job["id"], "done", len(urls), brief=b["text"], topic=b["topic"], cards=b["cards"])
     return {"status": "done", "brief": b["text"], "facts": r["facts"], "rejected": r["rejected"],
             "suspicious": r["suspicious"]}

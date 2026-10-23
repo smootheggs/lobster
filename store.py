@@ -35,6 +35,29 @@ def read_jsonl(path: Path) -> list[dict]:
     return out
 
 
+def read_jsonl_tail(path: Path, max_bytes: int = 256 * 1024) -> list[dict]:
+    """Only the newest lines of a log that keeps growing (e.g. timings): reads at most the
+    last 256 KB, so the app's status stays quick after months of use."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            raw = f.read()
+    except OSError:
+        return []
+    lines = raw.decode("utf-8", "replace").splitlines()
+    if size > max_bytes:
+        lines = lines[1:]                          # the first line may be cut in half
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
 def write_atomic(path: Path, data: str | bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -73,7 +96,7 @@ def timing_summary(last: int = 20) -> dict[str, float]:
     if _timings_file is None:
         return {}
     runs: dict[str, list[float]] = {}
-    for r in read_jsonl(_timings_file)[-2000:]:
+    for r in read_jsonl_tail(_timings_file):
         if isinstance(r.get("seconds"), (int, float)):
             runs.setdefault(str(r.get("step")), []).append(r["seconds"])
     return {k: round(sum(v[-last:]) / len(v[-last:]), 1) for k, v in runs.items()}

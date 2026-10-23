@@ -46,6 +46,7 @@ import ollama
 import research
 import shiba
 import spider
+import zim
 from store import append_jsonl, read_jsonl, timing_summary
 
 log = logging.getLogger("lobster.web")
@@ -289,7 +290,7 @@ class App:
                 "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(),
                 "research_waiting": len(research.pending()), "now": self.now(), "busy": self.busy(),
                 "last_backup": memory.last_backup(), "research_seconds": t.get("research"),
-                "online": spider.online(), "ollama": ollama.version_problem(),
+                "online": spider.online(), "ollama": ollama.version_problem(), "reply_speed": ollama.speed("chat"), "offline_wiki": [z.copy for z in zim.library(config.KIWIX_DIR)],
                 "doors": self.doors.urls() if self.doors else [],
                 "wifi": self.doors.wifi_note if self.doors and "wifi" in self.doors.entries else None,
                 "name": config.APP_NAME, "version": config.VERSION}
@@ -386,12 +387,17 @@ class App:
 
     def review(self, s, body):
         card_id, status = str(body.get("id", ""))[:40], str(body.get("status", ""))
-        if status not in ("verified", "wrong", "unreviewed"):
+        if status not in memory.STATUSES:
             return {"ok": False, "reply": "Unknown review."}
         if shiba.paused():
             return {"ok": False, "reply": f"🐕 {config.APP_NAME} is paused. Send /resume first."}
         ok = elephant.review(card_id, status)
-        return {"ok": ok, "reply": f"Marked {status}." if ok else "Couldn't find that card in your vault."}
+        words = {"verified": "matches its source", "wrong": "doesn't match", "set_aside": "set aside",
+                 "unreviewed": "back to review"}
+        return {"ok": ok, "reply": f"🐘 Marked: {words[status]}." if ok else "Couldn't find that card in your vault."}
+
+    def review_queue(self, s, q):
+        return {"cards": elephant.review_queue()}
 
     def pause(self, s, body):
         shiba.audit("web_command", command="pause")
@@ -410,7 +416,7 @@ class App:
         return {"reply": f"Logged out everywhere ({n} session{'s' if n != 1 else ''})."}
 
     GETS = {"/api/me": me, "/api/status": status, "/api/research": research_list, "/api/cards": cards_list,
-            "/api/library": library, "/api/memory": memory_search, "/api/audit": audit_list}
+            "/api/library": library, "/api/review_queue": review_queue, "/api/memory": memory_search, "/api/audit": audit_list}
     POSTS = {"/api/chat": chat, "/api/approve": approve, "/api/cancel": cancel, "/api/research": research_new,
              "/api/ask": ask, "/api/note": note, "/api/save": save, "/api/stop": stop, "/api/new": new,
              "/api/review": review, "/api/pause": pause, "/api/resume": resume, "/api/logout": logout,
@@ -540,7 +546,9 @@ def make_handler(app: App):
                 name = f.name.replace('"', "")
                 return self._send(200, f.read_bytes(), "application/octet-stream",
                                   {"Content-Disposition": f'attachment; filename="{name}"'})
-            rel = "index.html" if url.path in ("", "/") else url.path
+            # /share is where Android's Share menu opens the app: the same page, and nothing is saved
+            # until you tap a button in it (a link to /share from a website can't write anything).
+            rel = "index.html" if url.path in ("", "/", "/share") else url.path
             f = confined(WEB_DIR, rel)
             if f is None or f.suffix not in STATIC_TYPES:
                 return self._error(404, "no such page")

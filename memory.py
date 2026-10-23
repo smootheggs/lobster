@@ -29,7 +29,7 @@ from config import BACKUP_DIR, DB_PATH, EMBED_MODEL, MEMORY_MD
 
 SCHEMA_VERSION = 3
 KEEP_BACKUPS = 14
-STATUSES = ("unreviewed", "verified", "wrong")
+STATUSES = ("unreviewed", "verified", "wrong", "set_aside")   # set_aside: kept and used, just not worth reviewing
 
 BASE = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -255,6 +255,42 @@ def search(query: str, k: int = 6, min_score: float = 0.45) -> list[dict]:
         con.close()
     hits = [_row(r, wanted[r[0]] + (0.05 if r[5] == "verified" else 0.0)) for r in rows]
     return sorted(hits, key=lambda h: -h["score"])[:k]
+
+
+def similar_facts(fact_id: int, k: int = 12) -> list[dict]:
+    """Other web facts closest in meaning to this one (its own stored vector, so no model call).
+    Used to check a card against what other sources say."""
+    con = _db()
+    try:
+        with _vectors.lock:
+            _vectors.load(con)
+            ids, mat = _vectors.ids, _vectors.mat
+        where = np.nonzero(ids == fact_id)[0]
+        if not len(where):
+            return []
+        v = mat[where[0]].astype(np.float32)
+        scores = mat.astype(np.float32) @ v
+        top = [int(i) for i in np.argsort(-scores)[: k + 1] if int(ids[i]) != fact_id][:k]
+        wanted = {int(ids[i]): float(scores[i]) for i in top}
+        if not wanted:
+            return []
+        marks = ",".join("?" * len(wanted))
+        rows = con.execute(f"SELECT {_COLS} FROM facts f WHERE f.id IN ({marks}) AND f.tag='web' "
+                           "AND f.status != 'wrong'", list(wanted)).fetchall()
+    finally:
+        con.close()
+    return sorted((_row(r, wanted[r[0]]) for r in rows), key=lambda h: -h["score"])
+
+
+def card_detail(card_id: str) -> dict | None:
+    """A card with its fact, the source sentence and its neighbours, and where it came from."""
+    con = _db()
+    r = con.execute("SELECT c.id, c.title, c.path, c.job, c.status, c.fact_id, f.text, f.sentence, f.source, "
+                    "f.fetched_at FROM cards c LEFT JOIN facts f ON f.id = c.fact_id WHERE c.id=? AND c.kind='card'",
+                    (card_id,)).fetchone()
+    con.close()
+    keys = ("id", "title", "path", "job", "status", "fact_id", "text", "context", "source", "fetched_at")
+    return dict(zip(keys, r)) if r else None
 
 
 def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> list[dict]:

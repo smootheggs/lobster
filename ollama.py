@@ -7,6 +7,8 @@ import time
 import threading
 import urllib.request
 
+import config
+import store
 from config import OLLAMA_URL
 
 # An opener with an empty proxy map ignores http_proxy/https_proxy env vars.
@@ -29,18 +31,55 @@ def _post(path: str, payload: dict, timeout: int = 300) -> dict:
 
 
 def chat(model: str, messages: list[dict], schema: dict | None = None,
-         keep_alive: str | int = "5m", num_ctx: int = 4096, temperature: float = 0.0) -> str:
-    """Return the model's reply text. With a schema, Ollama forces valid JSON."""
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "keep_alive": keep_alive,
-        "options": {"temperature": temperature, "num_ctx": num_ctx},
-    }
+         keep_alive: str | int = "5m", num_ctx: int = 0, temperature: float = 0.0,
+         purpose: str = "chat", threads: int | None = None, think: str | None = None) -> str:
+    """Return the model's reply text. With a schema, Ollama forces valid JSON.
+    Every call records how long reading the prompt and writing the answer took."""
+    options = {"temperature": temperature, "num_ctx": num_ctx or config.MODEL_CTX}
+    threads = config.MODEL_THREADS if threads is None else threads
+    if threads:
+        options["num_thread"] = threads
+    payload = {"model": model, "messages": messages, "stream": False, "keep_alive": keep_alive, "options": options}
     if schema:
         payload["format"] = schema
-    return _post("/api/chat", payload)["message"]["content"]
+    # Only thinking models accept the switch; others would refuse the request.
+    if (config.MODEL_THINK if think is None else think) == "off" and model.startswith(THINKING_MODELS):
+        payload["think"] = False
+    started = time.monotonic()
+    r = _post("/api/chat", payload)
+    _record(purpose, model, r, time.monotonic() - started)
+    return r["message"]["content"]
+
+
+LAST = {}     # the most recent call's numbers, for bench.py
+THINKING_MODELS = ("qwen3", "deepseek-r1", "magistral", "gpt-oss")
+
+
+def _record(purpose: str, model: str, r: dict, seconds: float) -> None:
+    """Ollama reports how long it spent loading, reading the prompt and writing the answer."""
+    ns = lambda k: round((r.get(k) or 0) / 1e9, 2)
+    row = {"step": f"model_{purpose}", "seconds": round(seconds, 2), "model": model,
+           "load_s": ns("load_duration"), "read_s": ns("prompt_eval_duration"), "write_s": ns("eval_duration"),
+           "in_tokens": r.get("prompt_eval_count") or 0, "out_tokens": r.get("eval_count") or 0}
+    LAST.clear()
+    LAST.update(row)
+    if store._timings_file is not None:
+        try:
+            store.append_jsonl(store._timings_file, row)
+        except OSError:
+            pass
+
+
+def speed(purpose: str = "chat", last: int = 20) -> dict | None:
+    """Average seconds for the last few calls: total, reading, writing."""
+    if store._timings_file is None:
+        return None
+    rows = [r for r in store.read_jsonl_tail(store._timings_file) if r.get("step") == f"model_{purpose}"][-last:]
+    if not rows:
+        return None
+    avg = lambda k: round(sum(float(r.get(k) or 0) for r in rows) / len(rows), 1)
+    return {"seconds": avg("seconds"), "read_s": avg("read_s"), "write_s": avg("write_s"),
+            "load_s": avg("load_s"), "calls": len(rows)}
 
 
 def embed(model: str, texts: list[str], keep_alive: str | int = "5m") -> list[list[float]]:

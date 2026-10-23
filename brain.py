@@ -47,7 +47,7 @@ def _think_sync(history: list[dict]) -> dict:
     except Exception:          # memory empty or embed model missing: carry on without it
         facts = []
     messages = [{"role": "system", "content": _system_prompt(facts)}] + history
-    content = ollama.chat(MODEL, messages, schema=SCHEMA, keep_alive=CHAT_KEEP_ALIVE)
+    content = ollama.chat(MODEL, messages, schema=SCHEMA, keep_alive=CHAT_KEEP_ALIVE, purpose="chat")
     try:
         decision = json.loads(content)
     except json.JSONDecodeError:

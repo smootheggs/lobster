@@ -29,7 +29,7 @@ import memory
 import ollama
 import shiba
 import vault
-from config import ARCHIVE_DIR, CACHE_DIR, CHAT_KEEP_ALIVE, EMBED_MODEL, LOCI, MODEL
+from config import ARCHIVE_DIR, CACHE_DIR, CHAT_KEEP_ALIVE, EMBED_MODEL, LOCI, MODEL, WRITER_MODEL
 from store import timed
 
 INBOX = CACHE_DIR / "inbox"
@@ -422,10 +422,10 @@ def choose_points(question: str, facts: list[dict]) -> tuple[str, list[tuple[int
     numbered = "\n".join(f"{i}. {f['text']}" for i, f in enumerate(facts, 1))
     topic, points = "", []
     try:
-        reply = ollama.chat(MODEL, [{"role": "system", "content": BRIEF_SYSTEM},
+        reply = ollama.chat(WRITER_MODEL, [{"role": "system", "content": BRIEF_SYSTEM},
                                     {"role": "user", "content": f"Question: {question}\n"
                                                                 f"<web_facts>\n{numbered}\n</web_facts>"}],
-                            schema=BRIEF_SCHEMA, keep_alive=CHAT_KEEP_ALIVE, temperature=0.2)
+                            schema=BRIEF_SCHEMA, keep_alive=CHAT_KEEP_ALIVE, temperature=0.2, purpose="brief")
         data = json.loads(reply)
         topic = data.get("topic") if isinstance(data.get("topic"), str) else ""
         for p in data.get("points", []) if isinstance(data.get("points"), list) else []:
@@ -476,7 +476,7 @@ def loci_for(text: str) -> list[str]:
     return [LOCI[i] for i in np.argsort(-scores) if scores[i] >= best - 0.03][:2]
 
 
-def brief(job: dict, urls: list[str]) -> dict:
+def brief(job: dict, urls: list[str], copies: dict[str, str] | None = None) -> dict:
     """Write the brief: key points as cards in the vault, with source pages and a map.
     Returns {"text", "topic", "cards"}; the text is what Telegram and the app show."""
     with timed("brief"):
@@ -491,12 +491,13 @@ def brief(job: dict, urls: list[str]) -> dict:
         bullets = [f"- {claim} [{numbers[facts[i]['source']]}]" for i, claim in points]
         filed = ""
         try:
-            n = file_brief(job, topic, [(facts[i], claim) for i, claim in points], list(numbers))
+            n = file_brief(job, topic, [(facts[i], claim) for i, claim in points], list(numbers), copies)
             filed = f"\n\n{n} new card{'s' if n != 1 else ''} filed in {vault.INBOX.name}, waiting for your review."
         except Exception as e:              # the vault is optional: the brief still arrives
             shiba.audit("vault_write_failed", job=job["id"], error=f"{type(e).__name__}: {e}")
             filed = "\n\n(Couldn't write to the vault this time; the facts are saved in memory.)"
-        sources = "\n".join(f"[{n}] {u}" for u, n in numbers.items())
+        sources = "\n".join(f"[{n}] {u}" + (" (offline copy)" if (copies or {}).get(u) else "")
+                            for u, n in numbers.items())
         unread = len(urls) - len(numbers)
         also = f"\n(+{unread} more article{'s' if unread != 1 else ''} read; their facts are in memory for /ask)" if unread > 0 else ""
         text = (f"{head}\n\n" + "\n".join(bullets) + f"\n\nSources:\n{sources}{also}{filed}"
@@ -504,7 +505,8 @@ def brief(job: dict, urls: list[str]) -> dict:
     return {"text": text, "topic": topic, "cards": len(points)}
 
 
-def file_brief(job: dict, topic: str, points: list[tuple[dict, str]], urls: list[str]) -> int:
+def file_brief(job: dict, topic: str, points: list[tuple[dict, str]], urls: list[str],
+               copies: dict[str, str] | None = None) -> int:
     """Cards first (their final titles are needed for links), then source pages, then the map."""
     map_title = vault.unique_title(topic)
     src_titles: dict[str, str] = {}
@@ -530,7 +532,8 @@ def file_brief(job: dict, topic: str, points: list[tuple[dict, str]], urls: list
     for url in urls:
         sid = f"lb-s{sha1(url.encode()).hexdigest()[:10]}"
         if memory.card(sid) is None:             # source pages are written once and never edited
-            path = vault.write_source(sid, src_titles[url], url, time.strftime("%Y-%m-%d"), cited[url])
+            path = vault.write_source(sid, src_titles[url], url, time.strftime("%Y-%m-%d"), cited[url],
+                                      copy=(copies or {}).get(url, ""))
             memory.add_card(sid, "source", path.stem, vault.relative(path), job=job["id"])
     mid = f"lb-m{job['id']}"
     path = vault.write_map(mid, map_title, job["question"], job["id"], card_titles,
@@ -573,6 +576,74 @@ def ask(question: str, k: int = 6) -> dict:
             mark = "✓ " if h["status"] == "verified" else ""
             lines.append(f"• {mark}{h['text']}\n   ↳ {source_title(h['source'])}")
     return {"text": "🐘 Here's what I remember:\n\n" + "\n".join(lines), "hits": hits}
+
+
+# --- Reviewing: "does the card say what its source says?" --------------------------------
+# Plain code checks each card before you see it, so the doubtful ones come first.
+
+AGREE = 0.82            # another source saying the same thing
+RELATED = 0.6           # another source talking about the same thing
+YEAR = re.compile(r"\b(1\d{3}|20\d{2})\b")
+_FILLER = set("the a an of and or in on at to for from by with as is was were are be been its their his her this that "
+              "which who whom it".split())
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[^\W\d_]{3,}", (text or "").lower()) if w not in _FILLER}
+
+
+def checks(card: dict) -> dict:
+    """What the other sources in memory say about this card, worked out by code (no model):
+    agree: how many other sources say the same; conflict: different years for the same thing;
+    own_words: is the title the source's own wording; numbers: does it state numbers or dates."""
+    text, out = card.get("text") or "", {"agree": 0, "agree_sources": [], "conflict": None,
+                                        "own_words": True, "numbers": bool(re.search(r"\d", card.get("text") or ""))}
+    title_words = _words(card.get("title"))
+    out["own_words"] = bool(title_words) and title_words <= _words(text) | _words(card.get("context"))
+    if not card.get("fact_id"):
+        return out
+    try:
+        others = memory.similar_facts(card["fact_id"])
+    except Exception:
+        return out
+    mine, years = card.get("source"), set(YEAR.findall(text))
+    agreeing = []
+    for f in others:
+        if f["source"] == mine:
+            continue
+        if f["score"] >= AGREE and f["source"] not in agreeing:
+            agreeing.append(f["source"])
+        if (out["conflict"] is None and f["score"] >= RELATED and years
+                and (theirs := set(YEAR.findall(f["text"]))) and not (years & theirs)
+                and len(_words(text) & _words(f["text"])) >= 2):
+            out["conflict"] = {"mine": ", ".join(sorted(years)), "theirs": ", ".join(sorted(theirs)),
+                               "source": source_title(f["source"]), "text": f["text"]}
+    out["agree"], out["agree_sources"] = len(agreeing), [source_title(u) for u in agreeing[:3]]
+    return out
+
+
+def review_queue(limit: int = 30) -> list[dict]:
+    """Cards waiting for review, doubtful ones first: sources disagree, then numbers or dates
+    from a single source, then reworded titles, then the rest (newest first)."""
+    questions = {}
+    try:
+        import research                      # only for the question each card came from
+        questions = {j["id"]: j["question"] for j in research.history(500)}
+    except Exception:
+        pass
+    out = []
+    for c in memory.cards("card", "unreviewed", limit=300):
+        d = memory.card_detail(c["id"])
+        if not d:
+            continue
+        d["checks"] = checks(d)
+        d["source_title"] = source_title(d["source"]) if d.get("source") else ""
+        d["question"] = questions.get(d["job"], "")
+        out.append(d)
+    def rank(d):
+        k = d["checks"]
+        return (k["conflict"] is None, not (k["numbers"] and k["agree"] == 0), k["own_words"])
+    return sorted(out, key=rank)[:limit]
 
 
 def sync_reviews() -> int:

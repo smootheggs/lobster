@@ -159,6 +159,68 @@ function heldChip() {
   return n ? h("span", { class: "held", title: "Notes kept on this device until the tablet is reachable" }, `Waiting to send (${n})`) : null;
 }
 
+// --- Share to Sloth Lobster (Android's Share menu opens /share?title=&text=&url=) ------------
+// Read once, then the address bar goes back to "/". Nothing happens until you tap a button.
+S.share = (() => {
+  if (location.pathname !== "/share") return null;
+  const p = new URLSearchParams(location.search);
+  history.replaceState(null, "", "/");
+  const title = (p.get("title") || "").trim().slice(0, 300);
+  const text = (p.get("text") || "").trim().slice(0, 5000);
+  const link = (p.get("url") || "").trim() || (text.match(/https?:\/\/\S+/) || [""])[0];
+  const url = /^https?:\/\/[^\s]{3,2000}$/.test(link) ? link : "";
+  const body = url ? text.replace(url, "").trim() : text;
+  return title || body || url ? { title, text: body, url } : null;
+})();
+
+function showShare() {
+  if (!S.share) return;
+  S.thread.push({ t: "share", ...S.share });
+  S.share = null;
+  paintThread();
+}
+
+function shareCard(m) {
+  if (m.settled) return h("div", { class: "ask settled" }, h("div", { class: "what", icon: "check" }, ` ${m.result}`));
+  const card = h("div", { class: "ask share", role: "group", "aria-label": "Shared with Sloth Lobster" });
+  const noteText = [m.title, m.text, m.url].filter(Boolean).join("\n");
+  const question = (m.title || m.text).replace(/\s+/g, " ").slice(0, 300);
+  const act = guard(async (kind) => {
+    card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    let reply;
+    try {
+      if (kind === "note") reply = (await api("/api/note", { text: noteText, id: newId() })).reply;
+      if (kind === "link") reply = (await api("/api/save", { url: m.url })).reply;
+      if (kind === "research") {
+        reply = (await api("/api/research", { question })).reply;
+        const job = (reply || "").match(/Research #(\d+)(?: is)? queued/);
+        if (job) watch(Number(job[1]));
+      }
+    } catch (e) {
+      if (kind === "note" && e instanceof Unreachable && hold({ id: newId(), text: noteText, at: Date.now() })) {
+        reply = "📥 Held on this device. It's sent by itself when the tablet is reachable.";
+      } else {
+        card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+        throw e;
+      }
+    }
+    Object.assign(m, { settled: true, result: kind === "dismiss" ? "Dismissed. Nothing was saved." : reply || "Done." });
+    paintThread();
+    paintChrome();
+  });
+  card.append(
+    h("div", { class: "label" }, "🐕 Shared with Sloth Lobster · nothing is saved until you choose"),
+    m.title ? h("div", { class: "what" }, m.title) : null,
+    m.text ? h("div", { class: "why share-text" }, m.text.length > 280 ? `${m.text.slice(0, 280)}…` : m.text) : null,
+    m.url ? h("div", { class: "why share-url" }, m.url) : null,
+    h("div", { class: "row" },
+      h("button", { class: "btn solid", onclick: () => act("note") }, "Save note"),
+      m.url ? h("button", { class: "btn", onclick: () => act("link") }, "Save link") : null,
+      question ? h("button", { class: "btn", onclick: () => act("research") }, "Research it") : null,
+      h("button", { class: "btn", onclick: () => act("dismiss") }, "Dismiss")));
+  return card;
+}
+
 // --- Status --------------------------------------------------------------------------------------
 function dotState(s) {
   if (S.unreachable) return ["down", "can't reach tablet"];
@@ -236,6 +298,7 @@ function item(m) {
   if (m.t === "lob") return h("div", { class: `lob ${m.kind || ""}` }, m.text);
   if (m.t === "step") return h("div", { class: `step${m.live ? " live" : ""}`, icon: m.live ? "loader" : "check" }, m.text);
   if (m.t === "ask") return askCard(m);
+  if (m.t === "share") return shareCard(m);
   if (m.t === "brief") return briefCard(m.job);
   return h("div");
 }
@@ -250,7 +313,7 @@ function askCard(m) {
     paintThread();
   });
   card.append(
-    h("div", { class: "label" }, "Needs your OK · valid 10 minutes"),
+    h("div", { class: "label" }, "🐕 Needs your OK · valid 10 minutes"),
     h("div", { class: "what" }, `${m.ask.label} “${m.ask.text}”`),
     h("div", { class: "why" }, `Asking because ${m.ask.why}.`),
     h("div", { class: "row" },
@@ -264,7 +327,7 @@ function briefCard(job) {
     .map((l) => l.slice(2).replace(/\s*\[\d+\]$/, ""));
   return h("div", { class: "card clickable", role: "button", tabindex: "0",
     onclick: () => openReader({ kind: "brief", job }), onkeydown: (e) => { if (e.key === "Enter") openReader({ kind: "brief", job }); } },
-    h("div", { class: "kicker" }, h("span", {}, `Brief · ${job.cards || 0} card${job.cards === 1 ? "" : "s"}`), h("span", {}, "in your vault")),
+    h("div", { class: "kicker" }, h("span", {}, `🐘 Brief · ${job.cards || 0} card${job.cards === 1 ? "" : "s"}`), h("span", {}, "in your vault")),
     h("div", { class: "head" }, job.topic || job.question),
     h("div", { class: "body" }, points.join(" · ") || "No usable facts came back."),
     h("div", { class: "body" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); } }, "Read brief")));
@@ -408,14 +471,16 @@ async function statusSheet() {
       h("div", { class: "sheet-title" }, h("span", { class: `dot ${cls}` }), label === "ready" ? "Ready" : label[0].toUpperCase() + label.slice(1)),
       h("dl", { class: "facts" },
         dd("Model", s.model_up ? `running (${s.model})` : "down"),
+        ...(s.reply_speed ? dd("Replies", `≈ ${s.reply_speed.seconds} s (reading ${s.reply_speed.read_s} s · writing ${s.reply_speed.write_s} s)`) : []),
         dd("Now", s.now || "idle"),
         dd("Research waiting", s.research_waiting),
-        dd("Cards to review", `${s.unreviewed} of ${s.cards}`),
+        dd("🐘 Cards to review", `${s.unreviewed} of ${s.cards}`),
         dd("Facts", `${s.owner_facts} yours · ${s.web_facts} web`),
-        dd("Blocked today", s.blocks_24h),
+        dd("🐕 Blocked today", s.blocks_24h),
         dd("Typical research", s.research_seconds == null ? "not measured yet"
           : s.research_seconds < 90 ? `${Math.round(s.research_seconds)} s` : `${(s.research_seconds / 60).toFixed(1)} min`),
-        dd("Internet", s.online === false ? "offline · research waits" : "online"),
+        dd("🕷️ Internet", s.online === false ? ((s.offline_wiki || []).length ? "offline · reading the offline copy" : "offline · research waits") : "online"),
+        dd("Offline Wikipedia", (s.offline_wiki || []).join(", ") || "none"),
         dd("Held here", `${outbox().length} waiting`),
         ...(s.doors || []).flatMap((d) => dd(`App (${d.kind})`, d.url.replace("https://", ""))),
         ...(s.wifi ? dd("Wi-Fi door", s.wifi) : []),
@@ -449,6 +514,97 @@ const norm = (t) => String(t || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " 
 // A title made from the sentence itself shouldn't be shown twice.
 const sameText = (text, title) => norm(text).startsWith(norm(title)) && norm(text).length - norm(title).length < 24;
 
+// --- Reviewing cards: one at a time, evidence first -------------------------------------------
+// The question is not "is this true?" (nobody can say for old history from one line) but
+// "does the card say what its source says?" The Elephant's own checks put doubtful cards first.
+
+// A link that opens the source scrolled to this sentence (Chrome's "text fragment" links).
+function atSentence(url, sentence) {
+  if (!isHttp(url)) return null;
+  const words = String(sentence || "").replace(/[\[\]()"“”]/g, " ").split(/\s+/).filter(Boolean).slice(0, 8).join(" ");
+  return words ? `${url}#:~:text=${encodeURIComponent(words)}` : url;
+}
+
+// The sentence's neighbours, with the card's own sentence marked.
+function contextView(c) {
+  const ctx = String(c.context || c.text || ""), text = String(c.text || "");
+  const at = text ? ctx.indexOf(text) : -1;
+  if (at < 0) return h("div", { class: "evidence" }, h("mark", {}, text || ctx));
+  return h("div", { class: "evidence" }, ctx.slice(0, at), h("mark", {}, text), ctx.slice(at + text.length));
+}
+
+function badges(k) {
+  const out = [];
+  if (k.conflict) out.push(h("div", { class: "badge warn" }, `⚠ Sources disagree: this says ${k.conflict.mine}, ${k.conflict.source} says ${k.conflict.theirs}`));
+  if (k.agree) out.push(h("div", { class: "badge ok" }, `✓ ${k.agree} other source${k.agree === 1 ? "" : "s"} say${k.agree === 1 ? "s" : ""} the same`));
+  else if (k.numbers) out.push(h("div", { class: "badge" }, "Single source, with numbers or dates: worth a look"));
+  if (!k.own_words) out.push(h("div", { class: "badge" }, "The title is reworded: check it says the same"));
+  return out;
+}
+
+async function reviewScreen() {
+  const { cards } = await api("/api/review_queue");
+  const box = h("div", { class: "reader-body review" });
+  let i = 0;
+  const next = () => { i += 1; paint(); };
+  const decide = guard(async (c, status) => {
+    if (status) {
+      const r = await api("/api/review", { id: c.id, status });
+      if (!r.ok) return say(r.reply, "blocked");
+      refreshStatus();
+    }
+    next();
+  });
+  const paint = () => {
+    const c = cards[i];
+    if (!c) {
+      box.replaceChildren(h("p", { class: "done" }, cards.length ? "🐘 All caught up. Thank you." : "🐘 Nothing to review. New research adds cards here."),
+        h("p", { class: "hint" }, "Unreviewed cards are still used; only ones you mark as not matching are left out."));
+      return;
+    }
+    const link = atSentence(c.source, c.text);
+    const card = h("div", { class: "review-card" },
+      h("div", { class: "kicker" }, h("span", {}, "🐘 Does the card say what its source says?"), h("span", {}, `${i + 1} of ${cards.length}`)),
+      ...badges(c.checks || {}),
+      h("div", { class: "claim" }, c.title),
+      contextView(c),
+      h("div", { class: "source-line" },
+        h("span", {}, c.source_title || "Source"),
+        link ? h("a", { href: link, target: "_blank", rel: "noopener noreferrer" }, "Open at this sentence") : null),
+      c.question ? h("div", { class: "hint" }, `From research: ${c.question}`) : null,
+      h("div", { class: "review-actions" },
+        h("button", { class: "btn solid", onclick: () => decide(c, "verified") }, "✓ Matches"),
+        h("button", { class: "btn danger", onclick: () => decide(c, "wrong") }, "✗ Doesn't match"),
+        h("button", { class: "btn", onclick: () => decide(c, null) }, "Not sure"),
+        h("button", { class: "btn", onclick: () => decide(c, "set_aside") }, "Not useful")),
+      h("p", { class: "hint small" }, "Swipe right if it matches, left if it doesn't."));
+    swipe(card, (dir) => decide(c, dir > 0 ? "verified" : "wrong"));
+    box.replaceChildren(card);
+  };
+  paint();
+  return box;
+}
+
+// Swipe a card left or right (touch or mouse). Taps and scrolling are left alone.
+function swipe(el, done) {
+  let x0 = null, y0 = 0, dx = 0;
+  el.addEventListener("pointerdown", (e) => { if (e.target.closest("button, a")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; });
+  el.addEventListener("pointermove", (e) => {
+    if (x0 === null) return;
+    dx = e.clientX - x0;
+    if (Math.abs(e.clientY - y0) > Math.abs(dx)) { x0 = null; el.style.transform = ""; return; }
+    el.style.transform = `translateX(${dx}px) rotate(${dx / 40}deg)`;
+  });
+  const end = () => {
+    if (x0 === null) return;
+    x0 = null;
+    el.style.transform = "";
+    if (Math.abs(dx) > 90) done(Math.sign(dx));
+  };
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+
 function cardView(c, onChange) {
   const body = h("div", { class: "card" },
     h("div", { class: "kicker" }, h("span", {}, "Card"), h("span", { class: `status-${c.status}` }, c.status)),
@@ -464,7 +620,7 @@ function cardView(c, onChange) {
           onChange?.();
           refreshStatus();
         }),
-      }, st === "verified" ? "Mark verified" : "Mark wrong")),
+      }, st === "verified" ? "✓ Matches source" : "✗ Doesn't match")),
       isHttp(c.source) ? h("a", { class: "btn small", href: c.source, target: "_blank", rel: "noopener noreferrer" }, "Source") : null));
   return body;
 }
@@ -481,15 +637,7 @@ async function readerBody(r) {
     paint();
     return [r.job.topic || r.job.question, box];
   }
-  if (r.kind === "review") {
-    const { cards } = await api("/api/cards?status=unreviewed");
-    const box = h("div", { class: "reader-body" });
-    const paint = () => box.replaceChildren(
-      h("p", { class: "hint" }, "Check each card against its source. Wrong cards are never used again; nothing is deleted."),
-      list(cards, (c) => cardView(c, paint), "Nothing to review. New research will add cards here."));
-    paint();
-    return ["Cards to review", box];
-  }
+  if (r.kind === "review") return ["Cards to review", await reviewScreen()];
   if (r.kind === "library") {
     const { items } = await api("/api/library");
     return ["Library", h("div", { class: "reader-body" }, list(items, (it) => h("div", { class: "card" },
@@ -667,6 +815,7 @@ async function start() {
     if (!document.querySelector(".app")) {
       renderApp();
       say("Can't reach the tablet right now. Notes you write are held on this device and sent later.");
+      showShare();
     }
     clearTimeout(S.retry);
     S.retry = setTimeout(start, 15000);
@@ -674,6 +823,7 @@ async function start() {
   }
   S.unreachable = false;
   renderApp();
+  showShare();
   schedule();
   flushOutbox();
 }
