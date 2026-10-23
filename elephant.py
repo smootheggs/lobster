@@ -768,7 +768,7 @@ def ask(question: str, k: int = 6) -> dict:
     """Answer from memory only: your notes first, then web facts with their sources. No model."""
     with timed("ask"):
         hits = memory.search(question, k=k) if question.strip() else []
-    hits.sort(key=lambda h: (h["tag"] != "owner", -h["score"]))
+    hits.sort(key=lambda h: (h["tag"] != "owner", -h.get("rank_score", h["score"])))
     if not hits:
         return {"text": "🐘 Nothing in your vault about that yet. Try other words, or /research it.", "hits": []}
     lines = []

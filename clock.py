@@ -21,8 +21,8 @@ except ImportError:                                          # very old Python: 
 
 
 def _find_tzdata() -> None:
-    """Termux keeps the time-zone files (pkg install tzdata) under $PREFIX/share/zoneinfo, where
-    Python may not look. Add the places that exist, so ZoneInfo finds them."""
+    """Some systems keep time-zone files where Python may not look; add the places that exist.
+    (On Termux there are none: `pip install tzdata` gives Python its own copy, found automatically.)"""
     if ZoneInfo is None:
         return
     prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
@@ -76,7 +76,7 @@ _names: dict[str, str] = {}
 
 
 def available() -> bool:
-    """True when this Python has a time-zone database (Termux: pkg install tzdata if not)."""
+    """True when this Python has a time-zone database (Termux: pip install tzdata if not)."""
     if ZoneInfo is None:
         return False
     try:
@@ -201,7 +201,7 @@ def answer(kind: str, place: str, now: float | None = None, lookup=None) -> str:
     """The reply to a time or date question, worked out by code."""
     if not available():
         return ("🦞 I can't tell the time anywhere else yet: this tablet has no time-zone data. "
-                "In Termux: pkg install tzdata")
+                "In Termux: pip install tzdata")
     stamp = time.time() if now is None else now
     here = datetime.fromtimestamp(stamp).astimezone()
     zone = zone_for(place, lookup)

@@ -28,6 +28,12 @@ A private research agent on the Legion Y700. It collects, files and guards knowl
 - **`/save <link>`:** keeps a document (an annual report, say) in your work folder with a receipt, and indexes its text for `/ask`.
 - **Reviews:** the question is *does the card say what its source says?* In the app, Cards to review shows one card at a time: the claim, the source sentence highlighted among its neighbours, and a link that opens the source at that sentence. Code checks each card first: other sources agreeing, sources disagreeing on a year, and reworded titles. Doubtful cards come first. Swipe right (matches) or left (doesn't), or tap Not sure / Not useful. In Obsidian, set `status` to `verified`, `wrong` or `set_aside`. The Elephant reads it back within 5 minutes. Wrong facts are never used again, and never deleted.
 
+- **Exact answers by code** (never guessed by the model):
+  - **Sums:** "15% of 240", "(1200 − 150) × 1.08".
+  - **Dates:** "how many days until 25 July", "what weekday is 13 August 2027", "90 days from today". A date that could be read two ways (03/04) gets a question back.
+  - **Units:** "10 km in miles", "72°F in °C", "3 cups in ml" (US measures).
+  - **Money:** "100 USD in HKD", from the European Central Bank's daily rates. Only the rates file is downloaded; nothing about you goes out. Offline, it uses the last rates and says their date.
+- **`/ask` and the chat's memory** search by meaning and by exact words together, so names, dates and numbers are found even when the wording differs.
 - **The time and date:** "what time is it in Hong Kong?" (or any city, or just "what time is it") is answered by code in a moment: exact, with daylight saving, never guessed. The model is told today's date and never to guess the time, prices, scores, weather or news.
 - **`/wrong`** (or *Wrong?* under the latest answer in the app): that answer was wrong. It's added to `Sloth Lobster misses.md` in your work folder, with your correction if you add one (`/wrong it's 12:20 AM there`), and becomes a test in the next update.
 
@@ -165,7 +171,7 @@ Put a Kiwix Wikipedia file (e.g. `wikipedia_en_top_mini_2026-09.zim`) in `/stora
 
 ## Looking after it
 
-- **Check-up:** `python doctor.py` prints one line per part, ✅ or ⚠️ with the fix. It covers the seal, Ollama and models, app doors, certificate expiry, the vault, backups, space, offline Wikipedia, time zones, start-up and the internet. It only looks; it changes nothing and prints no secrets.
+- **Check-up:** `python doctor.py` prints one line per part, ✅ or ⚠️ with the fix. It covers the seal, Ollama and models, app doors, certificate expiry, the vault, backups, space, offline Wikipedia, time zones, keyword search, start-up and the internet. It only looks; it changes nothing and prints no secrets.
 - **Updating:** `sh ~/lobster/scripts/update.sh` takes the newest `lobster-core*.zip` from Downloads.
   - It unpacks the new version into its own folder (`~/.lobster-next`) and tests it there. If any test fails, nothing changes.
   - It backs up your memory, keeps the previous version in `~/.lobster-prev`, installs, restarts, and shows what changed.

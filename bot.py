@@ -157,13 +157,28 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(HELP)
 
 
+SLOTH_MOMENT = (0.7, 1.1)      # seconds: an instant answer still shows "typing…" for a short moment
+
+
+async def sloth_moment(since: float) -> None:
+    """Answers worked out by code arrive in milliseconds, which reads as abrupt. Keep "typing…"
+    up for a short, slightly varied moment; replies that already took that long don't wait."""
+    import random
+    least = random.uniform(*SLOTH_MOMENT)
+    left = least - (time.monotonic() - since)
+    if left > 0:
+        await asyncio.sleep(left)
+
+
 @owner_only
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not shiba.message_allowed():
         await update.message.reply_text("🐕 Easy there: a few too many messages this minute. Give it a moment.")
         return
     await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    asked = time.monotonic()
     r = await conversation.handle(update.message.text, busy=BUSY if digest_lock.locked() else None)
+    await sloth_moment(asked)
     reply = r["reply"] + ("\n" + now_line() if r.get("action") == "research" else "")
     buttons = approval_buttons(r["code"], r.get("ask", {}).get("label", "Yes")) if r["code"] else None
     await update.message.reply_text(reply, reply_markup=buttons)

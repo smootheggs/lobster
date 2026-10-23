@@ -51,6 +51,7 @@ PROVIDERS = {                       # the only places research ever reads from
     "news": "https://news.google.com/rss/search",
     "weather": "https://api.open-meteo.com/v1/forecast",           # the start screen's weather only
     "geocode": "https://geocoding-api.open-meteo.com/v1/search",
+    "ecb": "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml",   # currency conversion only
 }
 PER_SEARCH = 3                      # search results looked at per phrase
 
@@ -305,6 +306,48 @@ def timezone_of(name: str) -> str | None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     write_atomic(path, json.dumps(dict(list(known.items())[-500:])))
     return tz or None
+
+
+# --- Exchange rates for currency questions (the European Central Bank's daily reference rates) ---
+# The whole daily file is downloaded, so nothing about you or your question goes out. Cached on
+# the tablet; offline, the last rates are used and their date is shown.
+
+def _parse_ecb(xml: str) -> dict | None:
+    """{"date": "2026-10-22", "rates": {"USD": 1.08, ...}} per euro, or None if it doesn't look right."""
+    day = re.search(r"<Cube\s+time=['\"](\d{4}-\d{2}-\d{2})['\"]", xml)
+    rates = {}
+    for cur, rate in re.findall(r"<Cube\s+currency=['\"]([A-Z]{3})['\"]\s+rate=['\"]([0-9]+(?:\.[0-9]+)?)['\"]", xml):
+        r = float(rate)
+        if 0 < r < 1_000_000:
+            rates[cur] = r
+    if not day or len(rates) < 10 or "USD" not in rates:
+        return None
+    rates["EUR"] = 1.0
+    return {"date": day.group(1), "rates": rates}
+
+
+def ecb_rates(max_age: float = 6 * 3600) -> dict | None:
+    """Today's (or the last known) rates per euro, with their date, or None if never fetched."""
+    path = CACHE_DIR / "ecb_rates.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        saved = saved if isinstance(saved, dict) and isinstance(saved.get("rates"), dict) else None
+    except (OSError, ValueError):
+        saved = None
+    if saved and time.time() - float(saved.get("fetched_at", 0)) < max_age:
+        return saved
+    if not online():
+        return saved
+    try:
+        fresh = _parse_ecb(fetch(PROVIDERS["ecb"], _opener(), robots=False)["content"])
+    except Exception:
+        fresh = None
+    if fresh is None:
+        return saved                               # malformed or unreachable: keep the last good rates
+    fresh["fetched_at"] = time.time()
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, json.dumps(fresh))
+    return fresh
 
 
 def weather(max_age: float = 1800) -> dict | None:

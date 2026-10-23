@@ -292,19 +292,47 @@ function say(text, kind = "") {
   paintThread();
 }
 
-// While waiting for a reply: the sloth rides his lobster across a small bubble. Pure CSS
-// (transform and opacity only), so it costs next to nothing; still with reduced motion.
-function slothThinking() {
-  return h("div", { class: "swim", role: "status", "aria-label": "Sloth Lobster is thinking" },
+// While waiting for a reply. Two moods, one pair:
+//  - first, the sloth on his lobster simply floats in place: fades in, bobs once, a bubble rises.
+//    That's the whole show for quick answers (about a second);
+//  - if the reply takes longer (FLOAT_MS), the same pair sets off and swims across, over and over,
+//    until it arrives.
+// Pure CSS (transform and opacity only); still with reduced motion. Repaints don't restart it:
+// the waiting message remembers when it began.
+const FLOAT_MS = 1300;
+function slothThinking(m) {
+  m.since = m.since || performance.now();
+  const waited = performance.now() - m.since;
+  const el = h("div", { class: `swim ${waited >= FLOAT_MS ? "long" : "float"}`, role: "status", "aria-label": "Sloth Lobster is thinking" },
     h("span", { class: "swim-wave" }),
     h("div", { class: "swim-glide" },
       h("span", { class: "swim-bub" }), h("span", { class: "swim-bub two" }),
       h("img", { class: "swim-bob", src: "/sloth-lobster.svg", alt: "", width: "34", height: "28" })));
+  if (waited < FLOAT_MS) {
+    setTimeout(() => { if (el.isConnected) { el.classList.remove("float"); el.classList.add("long"); } }, FLOAT_MS - waited);
+  }
+  return el;
+}
+
+// Answers worked out by code arrive in milliseconds, which feels abrupt. The sloth swims for a
+// short, slightly varied moment first (0.7–1.1 s; 0.4 s with reduced motion). Replies that already
+// took that long get no extra wait, and taps (approve, Wrong?, saving a note) are never delayed.
+const prefersStill = () => window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+function slothMoment(since) {
+  const least = prefersStill() ? 400 : 700 + Math.random() * 400;
+  const left = least - (performance.now() - since);
+  return left > 0 ? new Promise((done) => setTimeout(done, left)) : Promise.resolve();
 }
 
 function item(m, latest = false) {
+  if (m.fresh) {                        // a reply that just arrived settles in once (not on every repaint)
+    const el = item({ ...m, fresh: false }, latest);
+    el.classList.add("arrive");
+    m.fresh = false;
+    return el;
+  }
   if (m.t === "me") return h("div", { class: "me" }, m.text);
-  if (m.t === "lob" && m.kind === "thinking") return slothThinking();
+  if (m.t === "lob" && m.kind === "thinking") return slothThinking(m);
   if (m.t === "lob" && latest && !m.kind && !m.flagged && !S.unreachable) {
     // The latest plain answer can be marked wrong: it goes to a misses list and becomes a test.
     return h("div", { class: "lob-wrap" }, h("div", { class: "lob" }, m.text),
@@ -558,10 +586,12 @@ const submit = guard(async (raw) => {
   S.thread.push(wait);
   paintThread();
   const noteId = S.mode === "note" ? newId() : null;
+  const asked = performance.now();
   try {
     let r;
     try {
       r = await api(mode.path || "/api/chat", mode.path ? { [mode.key]: text, ...(mode.extra || {}), ...(noteId ? { id: noteId } : {}) } : { text });
+      if (!noteId) await slothMoment(asked);
     } catch (e) {
       if (!(noteId && e instanceof Unreachable)) { S.thread.splice(S.thread.indexOf(wait), 1); throw e; }
       S.thread.splice(S.thread.indexOf(wait), 1);
@@ -575,7 +605,7 @@ const submit = guard(async (raw) => {
       if (r.reply) S.thread.push({ t: "lob", text: r.reply.split("\n\n")[0] });
       S.thread.push({ t: "ask", code: r.code, ask: r.ask });
     } else {
-      S.thread.push({ t: "lob", text: r.reply || "Done.", kind: /Shiba blocked|paused/.test(r.reply || "") ? "blocked" : "" });
+      S.thread.push({ t: "lob", text: r.reply || "Done.", kind: /Shiba blocked|paused/.test(r.reply || "") ? "blocked" : "", fresh: true });
     }
     const job = (r.reply || "").match(/Research #(\d+)(?: is)? queued/);
     if (job) watch(Number(job[1]));

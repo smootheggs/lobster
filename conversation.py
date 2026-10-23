@@ -19,6 +19,7 @@ import re
 import time
 
 import clock
+import exact
 import research as jobs
 import shiba
 import spider
@@ -222,6 +223,9 @@ def quick(text: str) -> tuple[str, str] | None:
     when = clock.match(text)                   # the time and date: worked out by code, never guessed
     if when is not None:
         return "reply", clock.answer(*when, lookup=spider.timezone_of)
+    worked = exact.answer(text, rates_source=spider.ecb_rates)   # dates, sums, units, currency: by code
+    if worked is not None:
+        return "reply", worked[1]
     t = text.strip().rstrip("?").strip()
     m = RESEARCH_START.match(t)
     if m:

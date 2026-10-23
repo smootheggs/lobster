@@ -209,53 +209,95 @@ def _row(r, score) -> dict:
 _COLS = "f.id, f.text, f.tag, f.source, f.added, f.status, f.sentence"
 
 
+# Words too common to say what a question is about (they'd match almost every fact).
+_COMMON = set("""the and for with from that this what when where which who whom whose why how was were are
+is did does do have has had been being into over about after before during its their his her them they
+there then than also just like more most some any all can could would should will shall may might must
+tell know find show give make want need please your you our mine yours here only very much many such""".split())
+POOL = 30          # candidates taken from each list before merging
+RRF_K = 60         # Reciprocal Rank Fusion constant (the usual value)
+
+
+def _key_words(query: str) -> list[str]:
+    """The words worth matching exactly: names, numbers, uncommon words (at most 12)."""
+    words = [w for w in re.findall(r"[^\W_]+", query.lower()) if (len(w) >= 4 or w.isdigit()) and w not in _COMMON]
+    return list(dict.fromkeys(words))[:12]
+
+
+def _keyword_ids(con, query: str, pool: int) -> list[int]:
+    """Fact ids by keyword relevance (BM25). Each word is quoted, so nothing in a question can
+    act as search syntax (NEAR, *, AND, column filters...)."""
+    words = _key_words(query)
+    if not words or not _has_fts(con):
+        return []
+    try:
+        rows = con.execute("SELECT rowid FROM facts_fts WHERE facts_fts MATCH ? ORDER BY rank LIMIT ?",
+                           (" OR ".join(f'"{w}"' for w in words), pool)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [int(r[0]) for r in rows]
+
+
 def keyword_search(query: str, k: int = 6) -> list[dict]:
     """Full-text search; works without any model. Facts marked wrong are skipped."""
-    words = re.findall(r"\w{3,}", query.lower())
-    if not words:
-        return []
     con = _db()
     try:
-        if not _has_fts(con):
+        ids = _keyword_ids(con, query, k * 4)
+        if not ids:
             return []
-        rows = con.execute(
-            f"SELECT {_COLS} FROM facts_fts JOIN facts f ON f.id = facts_fts.rowid "
-            "WHERE facts_fts MATCH ? AND f.status != 'wrong' ORDER BY rank LIMIT ?",
-            (" OR ".join(f'"{w}"' for w in words), k)).fetchall()
+        marks = ",".join("?" * len(ids))
+        rows = con.execute(f"SELECT {_COLS} FROM facts f WHERE f.id IN ({marks}) AND f.status != 'wrong'", ids).fetchall()
     finally:
         con.close()
-    return [_row(r, 1.0) for r in rows]
+    order = {fid: i for i, fid in enumerate(ids)}
+    return [_row(r, 1.0) for r in sorted(rows, key=lambda r: order[r[0]])][:k]
 
 
 def search(query: str, k: int = 6, min_score: float = 0.45) -> list[dict]:
-    """Meaning-based search; falls back to keywords if the embedding model is unavailable.
-    Verified facts get a small boost; facts you marked wrong never come back."""
+    """Hybrid search: meaning (embeddings) and exact words (keyword index) together.
+
+    Each side ranks its best 30; the two lists are merged by rank (Reciprocal Rank Fusion), so
+    a fact that's close in meaning AND shares a name or number with the question comes first,
+    and an exact name that meaning alone misses is still found. To be shown, a fact must be
+    close in meaning (min_score) or share an uncommon word with the question. Verified facts get
+    a small boost; facts you marked wrong never come back. Works with either side missing."""
     con = _db()
     try:
+        meaning: dict[int, float] = {}
         with _vectors.lock:
             _vectors.load(con)
             ids, mat, dim = _vectors.ids, _vectors.mat, _vectors.dim
-        if not len(ids):
-            return keyword_search(query, k)
-        try:
-            q = np.asarray(ollama.embed(EMBED_MODEL, [query])[0], dtype=np.float32)
-        except Exception:
-            return keyword_search(query, k)
-        if q.shape[0] != dim:
-            return keyword_search(query, k)
-        q = q / (np.linalg.norm(q) + 1e-9)
-        scores = mat.astype(np.float32) @ q
-        top = np.argsort(-scores)[: k * 4]
-        wanted = {int(ids[i]): float(scores[i]) for i in top if scores[i] >= min_score}
+        if len(ids):
+            try:
+                q = np.asarray(ollama.embed(EMBED_MODEL, [query])[0], dtype=np.float32)
+            except Exception:
+                q = None
+            if q is not None and q.shape[0] == dim:
+                q = q / (np.linalg.norm(q) + 1e-9)
+                scores = mat.astype(np.float32) @ q
+                for i in np.argsort(-scores)[:POOL]:
+                    meaning[int(ids[i])] = float(scores[i])
+        words = _keyword_ids(con, query, POOL)
+        fused: dict[int, float] = {}
+        for rank, fid in enumerate(sorted(meaning, key=lambda f: -meaning[f]), 1):
+            fused[fid] = fused.get(fid, 0.0) + 1.0 / (RRF_K + rank)
+        for rank, fid in enumerate(words, 1):
+            fused[fid] = fused.get(fid, 0.0) + 1.0 / (RRF_K + rank)
+        keyword_hit = set(words)
+        wanted = [f for f in fused if meaning.get(f, 0.0) >= min_score or f in keyword_hit]
         if not wanted:
             return []
         marks = ",".join("?" * len(wanted))
         rows = con.execute(f"SELECT {_COLS} FROM facts f WHERE f.id IN ({marks}) AND f.status != 'wrong'",
-                           list(wanted)).fetchall()
+                           wanted).fetchall()
     finally:
         con.close()
-    hits = [_row(r, wanted[r[0]] + (0.05 if r[5] == "verified" else 0.0)) for r in rows]
-    return sorted(hits, key=lambda h: -h["score"])[:k]
+    hits = []
+    for r in rows:
+        h = _row(r, meaning.get(r[0], 0.0))
+        h["rank_score"] = fused[r[0]] + (0.002 if r[5] == "verified" else 0.0)
+        hits.append(h)
+    return sorted(hits, key=lambda h: -h["rank_score"])[:k]
 
 
 def similar_facts(fact_id: int, k: int = 12) -> list[dict]:

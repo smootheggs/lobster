@@ -157,10 +157,24 @@ def checks() -> list[tuple[bool, str]]:
             "Doesn't start by itself → see the README's start-up section")
     safely("Start-up", startup)
 
+    def keyword_index():
+        import sqlite3
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+            ok = True
+        except sqlite3.OperationalError:
+            ok = False
+        finally:
+            con.close()
+        add(ok, "Keyword search available (names and dates are found exactly)",
+            "No keyword search in this SQLite: /ask uses meaning only → pkg upgrade")
+    safely("Keyword search", keyword_index)
+
     def time_zones():
         import clock
         add(clock.available(), "Time zones available (the clock answers \"what time is it in …\")",
-            "No time-zone data: the clock can't tell other cities' time → pkg install tzdata")
+            "No time-zone data: the clock can't tell other cities' time → pip install tzdata")
     safely("Time zones", time_zones)
 
     def internet():

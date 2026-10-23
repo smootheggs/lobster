@@ -1356,6 +1356,34 @@ def _():
     assert per < 0.5, f"search took {per:.2f}s with 20,000 facts"
 
 
+@test("hybrid search: an exact name meaning-search misses is still found; search syntax can't get in")
+def _():
+    memory.add_facts(["The Treaty of Stralsund in 1370 marked the peak of the Hanseatic League's power."],
+                     "web", "https://en.wikipedia.org/wiki/Treaty_of_Stralsund_(1370)")
+    memory.search("warm up")                             # loads the vectors
+    real = ollama.embed
+    rng = np.random.default_rng(7)
+    dim = memory._vectors.dim or 256
+    ollama.embed = lambda model, texts: [list(rng.standard_normal(dim)) for _ in texts]   # meaning search sees noise
+    try:
+        hits = memory.search("Stralsund 1370", k=3)
+        assert hits and "Stralsund" in hits[0]["text"], hits
+        assert memory.search("what is the", k=3) == [], "common words alone matched facts"
+        for nasty in ('Stralsund" OR text:*', "NEAR(king queen)", "kings* AND -", '")) OR 1=1 --', "ü ß 漢字"):
+            memory.search(nasty, k=3)                   # must not raise or widen the search
+        assert all("Stralsund" in h["text"] for h in memory.search('Stralsund" OR text:*', k=5))
+    finally:
+        ollama.embed = real
+    both = memory.search("Treaty of Stralsund 1370 Hanseatic peak", k=3)
+    assert both and "Stralsund" in both[0]["text"], both
+    real_fts = memory._has_fts
+    memory._has_fts = lambda con: False
+    try:
+        assert memory.search("Treaty of Stralsund Hanseatic League power", k=3), "no keyword index: meaning search must still work"
+    finally:
+        memory._has_fts = real_fts
+
+
 @test("every slow step records how long it took")
 def _():
     t = store.timing_summary()
@@ -2713,8 +2741,8 @@ def _():
     try:
         if not clock.available():
             # Without time-zone data the clock must say so plainly, never guess (doctor.py shows the fix).
-            assert "pkg install tzdata" in clock.answer("time", "hk") and clock.match("time in hk") == ("time", "hk")
-            print("     (this tablet has no time-zone data yet: pkg install tzdata; checked the plain message instead)")
+            assert "pip install tzdata" in clock.answer("time", "hk") and clock.match("time in hk") == ("time", "hk")
+            print("     (this tablet has no time-zone data yet: pip install tzdata; checked the plain message instead)")
             return
         at = 1792772400.0                               # 2026-10-23 16:20 UTC: Friday 9:20 AM in San Francisco
         assert clock.match("What time is it in HK?") == ("time", "hk")
@@ -2775,7 +2803,7 @@ def _():
     n = len(CALLS)
     import clock
     r = asyncio.run(conversation.handle("What time is it in Hong Kong?"))
-    expect = "In Hong Kong it's" if clock.available() else "pkg install tzdata"
+    expect = "In Hong Kong it's" if clock.available() else "pip install tzdata"
     assert expect in r["reply"] and len(CALLS) == n, (r, len(CALLS) - n)
     real = conversation.think
     async def guessing(history):
@@ -2973,6 +3001,144 @@ def _():
     assert ".style.setProperty(" in js and "<style" not in js, "styles only through CSSOM (the page's CSP)"
 
 
+def _phrasings():
+    """About a thousand ways of asking, per kind, each with what the answer must contain."""
+    import itertools
+    lead = ["", "hey ", "ok ", "so ", "quick question, ", "please ", "and ", "lobster, "]
+    tail = ["", "?", "!", "??"]
+    cases = []
+    for l, place, t, q in itertools.product(lead, ["Hong Kong", "HK", "Tokyo", "Frankfurt", "New York City", "Zürich",
+                                                   "SF", "Berlin", "London", "Singapore"], tail,
+                                             ["what time is it in {p}", "what's the time in {p}", "time in {p}",
+                                              "current time in {p}", "what time is it in {p} right now"]):
+        cases.append(("time", l + q.format(p=place) + t, None))
+    for l, d, t, q in itertools.product(lead, ["25 July", "July 25", "25 July 2027", "christmas", "1 January 2027",
+                                               "2027-07-25", "25/12", "the 4th of july"], tail,
+                                         ["how many days until {d}", "days until {d}", "how many days till {d}",
+                                          "how long until {d}", "how many days are there until {d}"]):
+        cases.append(("date", l + q.format(d=d) + t, "day"))
+    for l, d, t, q in itertools.product(lead, ["13 August 2027", "4 July 1776", "christmas", "1 January 2030",
+                                               "July 4th, 2027"], tail,
+                                         ["what weekday is {d}", "what day of the week is {d}", "what day was {d}",
+                                          "what day will be {d}"]):
+        cases.append(("date", l + q.format(d=d) + t, "day"))
+    for l, n, u, t in itertools.product(lead, [3, 10, 90, 400], ["days", "weeks", "months"], tail):
+        cases.append(("date", f"{l}{n} {u} from today{t}", "after today"))
+        cases.append(("date", f"{l}{n} {u} ago{t}", "ago"))
+    for l, (expr, want), t in itertools.product(
+            lead, [("15% of 240", "= 36"), ("what is 15 percent of 240", "= 36"), ("2+2", "= 4"), ("2 + 2", "= 4"),
+                   ("whats 2^10", "1,024"), ("12 x 4", "= 48"), ("12 * 4", "= 48"), ("(1200 - 150) * 1.08", "1,134"),
+                   ("calculate 1,200 * 3", "3,600"), ("100 divided by 4", "= 25"), ("7 times 6", "= 42"),
+                   ("what's 3 squared", "= 9"), ("what is 81 / 9", "= 9"), ("compute 10 - 3 * 2", "= 4"),
+                   ("how much is 19.99 * 3", "59.97"), ("-5 + 3", "= -2"), ("2 to the power of 8", "256"),
+                   ("work out 360 / 12", "= 30"), ("what is 7 % 3", "= 1"), ("1,000,000 / 4", "250,000")], tail):
+        cases.append(("calc", f"{l}{expr}{t}", want))
+    for l, (q, want), t in itertools.product(
+            lead, [("10 km in miles", "6.21"), ("convert 72°F to °C", "22.2°C"), ("72 f in c", "22.2°C"),
+                   ("3 cups in ml", "709.76"), ("8 oz in grams", "226.8"), ("8 oz in ml", "236.59"),
+                   ("5 feet in cm", "152.4"), ("how many ounces in 2 pounds", "32"), ("100 km/h in mph", "62.14"),
+                   ("1 acre in square meters", "4,046.86"), ("500 mb in gb", "0.5 GB"), ("90 minutes in hours", "1.5"),
+                   ("26.2 miles in km", "42.16"), ("180 cm in feet", "5.9"), ("1 gallon in liters", "3.79"),
+                   ("convert 20 celsius to fahrenheit", "68°F"), ("how many grams in 1 pound", "453.59"),
+                   ("2 liters to cups", "8.45"), ("100 meters in yards", "109.36"), ("0 c in k", "273.1")], tail):
+        cases.append(("units", f"{l}{q}{t}", want))
+    for l, (q, want), t in itertools.product(
+            lead, [("100 usd in hkd", "778.70 HKD"), ("50 euros in yen", "8,210.00 JPY"), ("$100 to eur", "92.59 EUR"),
+                   ("100 dollars in hkd", "US dollars"), ("20 pounds in euros", "British pounds"),
+                   ("how much is 1000 yen in dollars", "6.58 USD"), ("convert 250 hkd to usd", "32.10 USD"),
+                   ("1000 rmb in euros", "129.87 EUR"), ("€50 in gbp", "42.00 GBP"), ("100 usd to twd", "doesn't publish"),
+                   ("10 chf in usd", "11.37 USD"), ("5000 yen to hkd", "256.09 HKD")], tail):
+        cases.append(("currency", f"{l}{q}{t}", want))
+    # People also start with a capital letter.
+    return cases + [(k, t[:1].upper() + t[1:], w) for k, t, w in cases if t[:1].islower()]
+
+
+NOT_EXACT = [f.format(x=x) for f, x in __import__("itertools").product(
+    ["what time does the {x} open", "what time did the {x} start", "how many days did the {x} last",
+     "calculate the impact of the {x}", "convert my {x} to a list", "what is the {x}", "tell me about the {x} in 1918",
+     "research the {x}", "is it time to visit the {x}", "what happened on 7/4/1776 at the {x}", "what's 9/11 about the {x}",
+     "the {x} is open 24/7", "save a note about the {x}", "who won the {x} in 2022", "how many people visit the {x}",
+     "what time will the {x} close", "how long did the {x} take", "days of the {x}", "timeline of the {x}",
+     "what was the {x} like in the 1500s"],
+    ["museum", "Hanseatic League", "Treaty of Westphalia", "ferry", "Battle of Hastings", "Tudor dynasty", "siege",
+     "copper market", "Bundesbank", "flu pandemic", "Lübeck harbour", "election", "notes", "kings of England",
+     "Silk Road"])]
+
+
+@test("phrasing suite: ~1,000 ways of asking each kind land right; ~300 look-alikes are left to the model")
+def _():
+    import clock
+    import exact
+    from datetime import date
+    rates = lambda: {"date": "2026-10-22", "rates": {"EUR": 1.0, "USD": 1.08, "HKD": 8.41, "JPY": 164.2, "GBP": 0.84,
+                                                      "CNY": 7.7, "CHF": 0.95, "CAD": 1.49, "AUD": 1.63, "SEK": 11.3}}
+    today = date(2026, 10, 23)
+    cases = _phrasings()
+    per_kind = {}
+    for kind, text, want in cases:
+        per_kind[kind] = per_kind.get(kind, 0) + 1
+        if kind == "time":
+            got = clock.match(text)
+            assert got and got[0] == "time" and got[1], (text, got)
+            continue
+        got = exact.answer(text, rates, today)
+        assert got and got[0] == kind and (want is None or want in got[1]), (text, got)
+    assert all(n >= 700 for n in per_kind.values()), per_kind
+    assert sum(per_kind.values()) >= 8000, per_kind
+    assert len(NOT_EXACT) >= 300
+    for text in NOT_EXACT:
+        assert clock.match(text) is None, ("the clock grabbed", text)
+        assert exact.answer(text, rates, today) is None, ("exact grabbed", text, exact.answer(text, rates, today))
+
+
+@test("exact answers by code: unsafe arithmetic refused fast; currency only from the fixed source, cached")
+def _():
+    import exact
+    started = time.monotonic()
+    for bad in ("__import__('os').system('ls')", "().__class__", "9**9**9", "2^10000", "1" + "+1" * 5000,
+                "(" * 200 + "1" + ")" * 200, "10**10**10", "abs(-1)", "x = 5", "lambda: 1"):
+        r = exact.calc_answer(bad)
+        assert r is None or "too big" in r, (bad, r)
+    assert time.monotonic() - started < 1.0, "a hostile sum took too long"
+    assert exact.calc_answer("what is 10/0") == "🦞 That divides by zero, so there's no answer."
+    for name in ("what is 9/11", "24/7", "what is 7/4/1776", "9/11", "what's 50/50"):
+        assert exact.answer(name) is None, ("read as a sum", name)
+    good = ('<gesmes:Envelope><Cube><Cube time="2026-10-22">' + "".join(
+        f"<Cube currency='{c}' rate='{r}'/>" for c, r in [("USD", "1.08"), ("JPY", "164.2"), ("HKD", "8.41"), ("GBP", "0.84"),
+                                                           ("CNY", "7.7"), ("CHF", "0.95"), ("CAD", "1.49"), ("AUD", "1.63"),
+                                                           ("SEK", "11.3"), ("NOK", "11.7")]) + "</Cube></Cube></gesmes:Envelope>")
+    assert spider._parse_ecb(good)["rates"]["USD"] == 1.08
+    for bad in ("<html>not rates</html>", good.replace("USD", "XXX"), "<Cube time='2026-10-22'><Cube currency='USD' rate='1e99'/></Cube>",
+                good.replace('time="2026-10-22"', "")):
+        assert spider._parse_ecb(bad) is None, bad[:60]
+    assert spider.PROVIDERS["ecb"] == "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+    path = spider.CACHE_DIR / "ecb_rates.json"
+    path.unlink(missing_ok=True)
+    spider._online.update(at=time.time(), up=False)
+    try:
+        assert spider.ecb_rates() is None
+        r = exact.currency_answer("100 usd in hkd", spider.ecb_rates)
+        assert "don't have exchange rates yet" in r, r
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(spider._parse_ecb(good), fetched_at=0)), encoding="utf-8")
+        r = exact.currency_answer("100 usd in hkd", spider.ecb_rates)
+        assert "778.70 HKD" in r and "22 October 2026" in r, "offline, the last rates (with their date) should be used"
+    finally:
+        spider._online.update(at=0.0, up=False)
+        path.unlink(missing_ok=True)
+
+
+@test("chat: sums, dates, units and money come from code; the model isn't asked")
+def _():
+    conversation.reset_session()
+    n = len(CALLS)
+    for text, want in (("15% of 240", "= 36"), ("10 km in miles", "6.21 miles"), ("what weekday is 13 August 2027", "Friday")):
+        r = asyncio.run(conversation.handle(text))
+        assert want in r["reply"], (text, r)
+    assert len(CALLS) == n, "the model was asked something code answers"
+    conversation.reset_session()
+
+
 @test("Share to Sloth Lobster: opening /share saves nothing; only a tap in the app does")
 def _():
     manifest = json.loads((Path(__file__).parent / "web" / "manifest.webmanifest").read_text(encoding="utf-8"))
@@ -3029,6 +3195,8 @@ print("\n💬 Bot flow")
 
 try:
     import bot
+    REAL_MOMENT = bot.SLOTH_MOMENT
+    bot.SLOTH_MOMENT = (0.0, 0.0)            # the tests don't wait for the sloth
 except ImportError as e:
     bot = None
     print(f"  ⏭️  skipped: {e} (run pip install -r requirements.txt)")
@@ -3256,6 +3424,27 @@ if bot:
         assert other == [(False, False, False), (True, False, True), (False, False, False), (False, False, False)], other
         assert tele == other, f"Telegram {tele} vs other adapter {other}"
         conversation.reset_session()
+
+    @test("Telegram: an instant answer keeps 'typing…' up for a short moment; slow replies don't wait more")
+    def _():
+        bot.SLOTH_MOMENT = REAL_MOMENT
+        try:
+            assert 0.5 <= bot.SLOTH_MOMENT[0] <= bot.SLOTH_MOMENT[1] <= 1.5, bot.SLOTH_MOMENT
+            started = time.monotonic()
+            sent = _say("15% of 240", {})
+            took = time.monotonic() - started
+            assert "= 36" in sent[0]["text"] and bot.SLOTH_MOMENT[0] - 0.05 <= took <= bot.SLOTH_MOMENT[1] + 0.5, took
+            started = time.monotonic()
+            asyncio.run(bot.sloth_moment(time.monotonic() - 5))       # a reply that already took 5 s
+            assert time.monotonic() - started < 0.05
+        finally:
+            bot.SLOTH_MOMENT = (0.0, 0.0)
+        js = (Path(__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+        assert "function slothMoment" in js and "if (!noteId) await slothMoment(asked)" in js
+        assert "prefers-reduced-motion" in js
+        assert "const FLOAT_MS = 1300" in js and "slothThinking(m)" in js and "m.since = m.since ||" in js
+        css = (Path(__file__).parent / "web" / "style.css").read_text(encoding="utf-8")
+        assert ".swim.float .swim-glide" in css and ".swim.long .swim-glide" in css and "@keyframes swim-off" in css
 
     @test("Telegram's command menu lists exactly the twelve commands")
     def _():
