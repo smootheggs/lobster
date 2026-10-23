@@ -309,6 +309,26 @@ def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> 
     return out[:limit]
 
 
+def fact_vectors(ids: list[int]) -> dict[int, np.ndarray]:
+    """Stored embeddings (normalised) for these facts; facts without one are left out."""
+    if not ids:
+        return {}
+    con = _db()
+    out = {}
+    try:
+        for start in range(0, len(ids), 500):
+            chunk = list(ids[start:start + 500])
+            marks = ",".join("?" * len(chunk))
+            for fid, blob in con.execute(f"SELECT id, embedding FROM facts WHERE id IN ({marks})", chunk):
+                v = np.frombuffer(blob, dtype=np.float32)
+                if len(v):
+                    n = np.linalg.norm(v)
+                    out[fid] = v / n if n else v
+    finally:
+        con.close()
+    return out
+
+
 def stats() -> dict:
     con = _db()
     counts = dict(con.execute("SELECT tag, COUNT(*) FROM facts GROUP BY tag").fetchall())

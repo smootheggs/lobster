@@ -11,13 +11,24 @@ A private research agent on the Legion Y700. It collects, files and guards knowl
 
 ## What it does for you
 
-- **`/research <question>`:** the Spider collects Wikipedia articles (and news for recent events). The Elephant keeps each article's own most relevant sentences, then writes a brief. The brief's key points become **cards** in `Slothvault/Lobster Inbox/`, with a **source page** per article and a **map** linking them.
+- **`/research <question>`:** quick research, outline first. Sloth Lobster splits your question into 2–3 sub-questions, using the overview article's own section headings as hints. The Spider collects Wikipedia articles for each one, plus news for recent events. The Elephant keeps each article's own sentences that answer them. The brief has three parts:
+  - a **bottom line**;
+  - a short answer per sub-question, with its cards;
+  - **Still open**: sub-questions little was found on, and dates sources disagree on.
+
+  Every sentence the model writes is checked by code against the facts it cites: each name and number must be in them, or the sentence is dropped. The cards land in `Slothvault/Lobster Inbox/`, with a **source page** per article and a **map** that follows the outline.
+- **`/deep <question>`:** deep research, overnight.
+  1. You get a plan of 3–5 sub-questions to OK, change (`/plan 7`, then one per line) or cancel.
+  2. Once you OK it, it runs between 23:00 and 06:00 while the tablet charges. It does 1 broad round, then up to 2 rounds that search again only for the sub-questions code finds thin, with a 60-minute limit.
+  3. It writes with the bigger model (`qwen2.5:7b`) and unloads it afterwards.
+  4. It saves its place after every round, and steps aside for any quick research you ask for in between.
+  5. The brief is here in the morning. In the app, use the **Deep** chip.
 - **`/note <text>`:** saved exactly as typed: a trusted fact, and a note in your vault inbox.
 - **`/ask <question>`:** answers from your vault only, your notes first, each web fact with its source. No web, no model, under a second.
 - **`/save <link>`:** keeps a document (an annual report, say) in your work folder with a receipt, and indexes its text for `/ask`.
 - **Reviews:** the question is *does the card say what its source says?* In the app, Cards to review shows one card at a time: the claim, the source sentence highlighted among its neighbours, and a link that opens the source at that sentence. Code checks each card first: other sources agreeing, sources disagreeing on a year, and reworded titles. Doubtful cards come first. Swipe right (matches) or left (doesn't), or tap Not sure / Not useful. In Obsidian, set `status` to `verified`, `wrong` or `set_aside`. The Elephant reads it back within 5 minutes. Wrong facts are never used again, and never deleted.
 
-The other commands are `/status`, `/stop` (stops research and keeps what was read), `/new` (a fresh chat), `/pause` and `/resume`.
+The other commands are `/plan <number>` (see or change a deep plan), `/status`, `/stop` (stops research and keeps what was read), `/new` (a fresh chat), `/pause` and `/resume`.
 
 ## The card guide (version 1; every note carries `card_version`, so it can grow)
 
@@ -98,6 +109,8 @@ It looks and works the same everywhere, and adapts to each screen:
 - **Y700 upright:** a centred column.
 - **Sideways and the S11 Ultra:** a sidebar, with briefs opening beside the chat.
 
+**The start screen** shows the time, the weather, a hello and four ways to begin. To set the weather's place, tap the weather line (or *Add weather*). Type a city, choose °F or °C, then Save. *Turn off* hides it. Only the place name goes out, once, to find it on the map, then rounded coordinates to Open-Meteo. The setting is kept in `data/settings.json`; `WEATHER_PLACE` in `.env` is only the starting value.
+
 **Three doors, one app** (`WEB_BIND=local, 100.x.y.z, wifi`):
 
 | Door | Address | When |
@@ -154,5 +167,6 @@ Put a Kiwix Wikipedia file (e.g. `wikipedia_en_top_mini_2026-09.zim`) in `/stora
   - If the tests fail, it stops.
   - If sealed files changed, it stops and shows the seal command: sealing stays your signature.
 - **Certificates:** the app's certificate renews itself 30 days before it expires (checked hourly).
+- **Research scorecard:** `python research_bench.py` scores your finished briefs by code. It shows sub-questions answered, sentences that passed the citation check, sources and time. It's read-only. Run it after a week and compare.
 - **What you use:** `/status` and the app show this week's counts (research, asks, notes, reviews, shares, held notes). A short line arrives on Sunday evenings. These come from logs Sloth Lobster already keeps; nothing new is tracked.
 - **Cards (guide v2):** new cards carry `about`, `question` and `section`. A title never starts with "it" or "its": the subject is put in, and the source sentence stays exact.

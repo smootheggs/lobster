@@ -18,7 +18,6 @@ import json
 import re
 import time
 
-import memory
 import research as jobs
 import shiba
 import spider
@@ -61,22 +60,29 @@ def reset_session() -> None:
     save_session({"history": [], "taint_turns": 0, "greeted": load_session().get("greeted", "")})
 
 
+# The sloth's hello: warm, unhurried, never gushing (the app's start area uses the same tone).
+HELLOS = {
+    "night": ["Still up? I'll keep things quiet.", "A late one. Short and gentle, then.", "Night owl hours. No rush at all."],
+    "morning": ["Good morning. Slow and steady today?", "Morning. Coffee first, curiosity second.",
+                "Good morning. Take your time, I'm here."],
+    "afternoon": ["Good afternoon. Nothing here is in a hurry.", "Afternoon. What's on your mind?",
+                  "Good afternoon. A good hour for a little reading."],
+    "evening": ["Good evening. Settle in.", "Evening. Feet up, mind open.", "Good evening. Glad you're here."],
+}
+
+
 def greeting(s: dict) -> str:
-    """🦥 The first chat of the day starts with one line about what's waiting for you. Code-written,
+    """🦥 The first chat of the day starts with a warm hello, and nothing to do. Code-written,
     so it costs no model time; only once a day, so it stays a small touch."""
     today = time.strftime("%Y-%m-%d")
     if s.get("greeted") == today:
         return ""
     s["greeted"] = today
-    hour = time.localtime().tm_hour
-    part = "Morning" if hour < 12 else "Afternoon" if hour < 18 else "Evening"
-    try:
-        waiting = int(memory.stats().get("unreviewed", 0))
-    except Exception:
-        waiting = 0
-    if waiting:
-        return f"🦥 {part}. {waiting} card{'s' if waiting != 1 else ''} waiting for you whenever you like.\n\n"
-    return f"🦥 {part}.\n\n"
+    t = time.localtime()
+    hour = t.tm_hour
+    part = "night" if hour < 5 or hour >= 23 else "morning" if hour < 12 else "afternoon" if hour < 18 else "evening"
+    hello = HELLOS[part][t.tm_yday % len(HELLOS[part])]      # the same all day, a different one tomorrow
+    return f"🦥 {hello}\n\n"
 
 
 def mark_tainted() -> None:
@@ -100,7 +106,7 @@ async def handle(text: str, busy: str | None = None) -> dict:
 
 
 # Typed commands are handled by code, never guessed at by the model.
-COMMAND_HELP = ("Commands: /research <question>, /ask <question>, /note <text>, /save <link>, "
+COMMAND_HELP = ("Commands: /research <question>, /deep <question>, /ask <question>, /note <text>, /save <link>, "
                 "/status, /stop, /new, /pause, /resume")
 
 
@@ -111,9 +117,11 @@ def command(text: str) -> str | None:
         return None
     name, _, arg = t[1:].partition(" ")
     name = name.split("@")[0].lower()
-    simple = {"research": research, "ask": ask, "note": note, "save": save_link}
+    simple = {"research": research, "deep": deep, "ask": ask, "note": note, "save": save_link}
     if name in simple:
         return simple[name](arg)
+    if name == "plan":
+        return plan_command(arg)
     if name == "stop":
         return stop()
     if name == "new":
@@ -301,6 +309,80 @@ def research(text: str) -> str:
                   if spider.offline_available() else
                   "\nWe're offline, so it waits here and runs by itself once we're back online.")
     return reply
+
+
+def deep(text: str) -> str:
+    """/deep: a long research job. It drafts a plan for your OK, then runs overnight."""
+    if not text.strip():
+        return ("Usage: /deep <question>. I draft a plan of sub-questions for your OK; "
+                f"then it runs overnight ({jobs.window_text()}) and the brief is here in the morning.")
+    verdict, reason = shiba.decide("deep_research", text, tainted=False)
+    if verdict == shiba.BLOCK:
+        return _blocked("deep research", reason)
+    return run_action("deep_research", text)
+
+
+def _deep_job(job_id) -> tuple[dict | None, str]:
+    try:
+        j = jobs.job(int(job_id))
+    except (TypeError, ValueError):
+        j = None
+    if j is None or j["mode"] != "deep":
+        return None, "🐘 There's no deep research with that number."
+    if j["done"] is not None:
+        return None, f"🐘 Deep research #{j['id']} is already {j['done'].get('status', 'finished')}."
+    return j, ""
+
+
+def deep_choice(job_id, choice: str) -> str:
+    """Your answer to a plan: "night" (OK, run tonight), "now" (OK, run now) or "cancel"."""
+    j, problem = _deep_job(job_id)
+    if j is None:
+        return problem
+    if choice == "cancel":
+        jobs.cancel(j["id"])
+        return f"🐘 Deep research #{j['id']} cancelled. Nothing was collected."
+    if shiba.paused():
+        return "🐕 Sloth Lobster is paused. Send /resume first."
+    if j["plan"] is None:
+        return f"🐘 The plan for #{j['id']} isn't ready yet; it comes in a minute."
+    jobs.approve(j["id"], choice)
+    if choice == "now":
+        return f"🐘 OK: deep research #{j['id']} starts now. It takes up to an hour; I'll send the brief here."
+    return (f"🐘 OK: deep research #{j['id']} runs tonight ({jobs.window_text()}), while the tablet charges. "
+            "The brief will be here in the morning.")
+
+
+def deep_edit(job_id, lines: list[str]) -> str:
+    """Your own sub-questions for a deep job (one per line). Asks for your OK again."""
+    j, problem = _deep_job(job_id)
+    if j is None:
+        return problem
+    if shiba.paused():
+        return "🐕 Sloth Lobster is paused. Send /resume first."
+    import outline
+    sections = outline.owner_plan(lines)
+    if not sections:
+        return "🐘 I couldn't read any sub-questions there. Send /plan <number>, then one question per line."
+    jobs.set_plan(j["id"], sections, (j["plan"] or {}).get("needs_news", False), by="owner")
+    return jobs.plan_text(j["id"], j["question"], sections)
+
+
+def plan_command(arg: str) -> str:
+    """/plan 7 (shows it), or /plan 7 followed by one sub-question per line (changes it)."""
+    head, _, rest = arg.strip().partition("\n")
+    number = head.split()[0] if head.split() else ""
+    lines = [x for x in ([" ".join(head.split()[1:])] + rest.split("\n")) if x.strip()]
+    if not number.isdigit():
+        return "Usage: /plan <number>, then one sub-question per line."
+    if lines:
+        return deep_edit(number, lines)
+    j, problem = _deep_job(number)
+    if j is None:
+        return problem
+    if j["plan"] is None:
+        return f"🐘 The plan for #{j['id']} isn't ready yet; it comes in a minute."
+    return jobs.plan_text(j["id"], j["question"], j["plan"]["sections"])
 
 
 def save_link(url: str) -> str:

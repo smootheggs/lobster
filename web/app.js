@@ -4,7 +4,7 @@
 
 const S = {
   csrf: "", thread: [], status: null, mode: "chat", sheet: null, reader: null,
-  jobs: [], watching: new Set(), timer: null, busySending: false, unreachable: false,
+  jobs: [], watching: new Set(), planWatch: new Set(), timer: null, busySending: false, unreachable: false,
 };
 
 // --- Tiny DOM helper: h("div", {class: "x", onclick: fn}, "text", child) ---------------------
@@ -29,6 +29,7 @@ const ICONS = {
   up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
   x: '<path d="M6 6l12 12M18 6L6 18"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   note: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
@@ -243,7 +244,7 @@ async function refreshStatus() {
     S.status = await api("/api/status");
     S.unreachable = false;
     rememberDoors(S.status.doors);
-    if (S.watching.size) await refreshJobs();
+    if (S.watching.size || S.planWatch.size) await refreshJobs();
     flushOutbox();
   } catch (e) {
     if (e instanceof LoggedOut) return showLogin();
@@ -255,13 +256,21 @@ async function refreshStatus() {
 
 function schedule() {
   clearTimeout(S.timer);
-  const active = S.watching.size || (S.status && (S.status.research_waiting || S.status.busy));
+  const active = S.watching.size || S.planWatch.size || (S.status && (S.status.research_waiting || S.status.busy));
   S.timer = setTimeout(() => { if (!document.hidden) refreshStatus(); else schedule(); }, active ? 3000 : 20000);
 }
 
 async function refreshJobs() {
   const { jobs } = await api("/api/research");
   S.jobs = jobs;
+  for (const id of [...S.planWatch]) {           // a deep job: its plan comes back for your OK
+    const job = jobs.find((j) => j.id === id);
+    if (job && job.stage === "planning") continue;
+    S.planWatch.delete(id);
+    const live = S.thread.find((m) => m.t === "step" && m.live && m.job === id);
+    if (live) Object.assign(live, { live: false, text: job && job.stage === "needs your OK" ? `Plan for deep research #${id} is ready` : `Deep research #${id}: ${job ? job.status : "gone"}` });
+    if (job && job.stage === "needs your OK") S.thread.push({ t: "plan", job });
+  }
   for (const id of [...S.watching]) {
     const job = jobs.find((j) => j.id === id);
     const live = S.thread.find((m) => m.t === "step" && m.live && m.job === id);
@@ -300,6 +309,7 @@ function item(m) {
   if (m.t === "ask") return askCard(m);
   if (m.t === "share") return shareCard(m);
   if (m.t === "brief") return briefCard(m.job);
+  if (m.t === "plan") return planCard(m);
   return h("div");
 }
 
@@ -323,23 +333,166 @@ function askCard(m) {
 }
 
 function briefCard(job) {
-  const points = (job.brief || "").split("\n").filter((l) => l.startsWith("- ")).slice(0, 2)
-    .map((l) => l.slice(2).replace(/\s*\[\d+\]$/, ""));
+  const lines = (job.brief || "").split("\n");
+  const bottom = lines.find((l) => l.startsWith("Bottom line: "));
+  const points = bottom ? [bottom.slice(13).replace(/\s*(\[\d+\])+/g, "")]
+    : lines.filter((l) => l.startsWith("- ")).slice(0, 2).map((l) => l.slice(2).replace(/\s*(\[\d+\])+$/, ""));
   return h("div", { class: "card clickable", role: "button", tabindex: "0",
     onclick: () => openReader({ kind: "brief", job }), onkeydown: (e) => { if (e.key === "Enter") openReader({ kind: "brief", job }); } },
-    h("div", { class: "kicker" }, h("span", {}, `🐘 Brief · ${job.cards || 0} card${job.cards === 1 ? "" : "s"}`), h("span", {}, "in your vault")),
+    h("div", { class: "kicker" }, h("span", {}, `🐘 ${job.mode === "deep" ? "Deep brief" : "Brief"} · ${job.cards || 0} card${job.cards === 1 ? "" : "s"}`), h("span", {}, "in your vault")),
     h("div", { class: "head" }, job.topic || job.question),
     h("div", { class: "body" }, points.join(" · ") || "No usable facts came back."),
     h("div", { class: "body" }, h("a", { href: "#", onclick: (e) => { e.preventDefault(); } }, "Read brief")));
+}
+
+// A deep job's plan: the sub-questions it will answer. OK it for tonight, run it now, change it, or cancel.
+function planCard(m) {
+  const job = m.job;
+  if (m.settled) return h("div", { class: "ask settled" }, h("div", { class: "what", icon: "check" }, ` ${m.result}`));
+  const card = h("div", { class: "ask plan", role: "group", "aria-label": "Deep research plan" });
+  const send = guard(async (body) => {
+    card.querySelectorAll("button, textarea").forEach((b) => (b.disabled = true));
+    const r = await api("/api/research/plan", { id: job.id, ...body });
+    if (body.lines) {                                  // changed: show the new plan, still waiting for the OK
+      const fresh = (await api("/api/research")).jobs.find((j) => j.id === job.id);
+      Object.assign(m, { job: fresh || job, editing: false });
+    } else Object.assign(m, { settled: true, result: r.reply });
+    refreshStatus();
+    paintThread();
+  });
+  const questions = job.plan || [];
+  card.append(h("div", { class: "label" }, `🐘 Plan for deep research #${job.id}`), h("div", { class: "what" }, job.question));
+  if (m.editing) {
+    const box = h("textarea", { class: "plan-edit", rows: Math.max(4, questions.length + 1), maxlength: 1200,
+      "aria-label": "Sub-questions, one per line" });
+    box.value = questions.join("\n");
+    card.append(h("div", { class: "why" }, "One sub-question per line."), box,
+      h("div", { class: "row" },
+        h("button", { class: "btn solid", onclick: () => send({ lines: box.value.split("\n").filter((x) => x.trim()) }) }, "Save plan"),
+        h("button", { class: "btn", onclick: () => { m.editing = false; paintThread(); } }, "Back")));
+    return card;
+  }
+  card.append(h("ol", { class: "plan-list" }, questions.map((q) => h("li", {}, q))),
+    h("div", { class: "why" }, "It runs tonight while the tablet charges, with the bigger writer. The brief is here in the morning."),
+    h("div", { class: "row" },
+      h("button", { class: "btn solid", icon: "moon", onclick: () => send({ choice: "night" }) }, " OK, tonight"),
+      h("button", { class: "btn", onclick: () => send({ choice: "now" }) }, "Run now"),
+      h("button", { class: "btn", onclick: () => { m.editing = true; paintThread(); } }, "Edit"),
+      h("button", { class: "btn", onclick: () => send({ choice: "cancel" }) }, "Cancel")));
+  return card;
+}
+
+// --- The start area: every time the app opens, and after New chat ---------------------------
+// Calm on purpose: the time, the weather, a hello, and a few ways to begin. Nothing to do,
+// no counts. The last conversation is one tap away. Clearing the screen never clears
+// Shiba's caution: only New chat does that.
+const HELLOS = {
+  night: [["Still up?", "I'll keep things quiet."], ["A late one.", "Short and gentle, then."], ["Night owl hours.", "No rush at all."]],
+  morning: [["Good morning.", "Slow and steady today?"], ["Morning.", "Coffee first, curiosity second."], ["Good morning.", "Take your time, I'm here."]],
+  afternoon: [["Good afternoon.", "Nothing here is in a hurry."], ["Afternoon.", "What's on your mind?"], ["Good afternoon.", "A good hour for a little reading."]],
+  evening: [["Good evening.", "Settle in."], ["Evening.", "Feet up, mind open."], ["Good evening.", "Glad you're here."]],
+};
+
+function slothHello(now = new Date()) {
+  const hr = now.getHours();
+  const part = hr < 5 || hr >= 23 ? "night" : hr < 12 ? "morning" : hr < 18 ? "afternoon" : "evening";
+  const day = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / 86400000);
+  return HELLOS[part][day % HELLOS[part].length];
+}
+
+const clockText = (d = new Date()) =>
+  `${d.toLocaleDateString(undefined, { weekday: "long" })} · ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+
+function weatherText(w) {
+  return w ? `${w.icon} ${w.temp}${w.unit} · ${w.text}${w.place ? ` in ${w.place}` : ""} · ${w.high}°/${w.low}°` : "";
+}
+
+let lastWeather = null;
+let weatherPrefs = { place: "", units: "fahrenheit" };
+async function fillWeather() {
+  try {
+    const r = await api("/api/weather");
+    lastWeather = r.weather || null;
+    weatherPrefs = { place: r.place || "", units: r.units || "fahrenheit" };
+  } catch { /* offline: just the time */ }
+  const el = document.querySelector(".start .weather");
+  if (el) el.replaceWith(weatherNode());
+}
+
+// The weather line is also where its place is set: tap it (or "Add weather") to change it.
+function weatherNode() {
+  const text = lastWeather ? weatherText(lastWeather) : weatherPrefs.place ? weatherPrefs.place : "Add weather";
+  return h("button", { class: `weather plain${lastWeather ? "" : " dim"}`, type: "button", title: "Change the weather's place",
+    onclick: openWeatherEdit }, text);
+}
+
+function openWeatherEdit() {
+  const el = document.querySelector(".start .weather");
+  if (!el) return;
+  let units = weatherPrefs.units;
+  const input = h("input", { class: "weather-input", value: weatherPrefs.place, placeholder: "City, e.g. San Francisco",
+    maxlength: "60", autocomplete: "off", "aria-label": "City for the weather" });
+  const label = () => (units === "fahrenheit" ? "°F" : "°C");
+  const unitBtn = h("button", { class: "btn small", type: "button", title: "Switch °F / °C", onclick: () => {
+    units = units === "fahrenheit" ? "celsius" : "fahrenheit";
+    unitBtn.textContent = label();
+  } }, label());
+  const msg = h("div", { class: "weather-msg" });
+  const close = () => form.replaceWith(weatherNode());
+  const save = async (place) => {
+    msg.textContent = "";
+    try {
+      const r = await api("/api/weather", { place, units });
+      if (!r.ok) { msg.textContent = r.reply; return; }
+      lastWeather = r.weather || null;
+      weatherPrefs = { place: r.place || "", units: r.units || units };
+      close();
+    } catch (e) { msg.textContent = e.message; }
+  };
+  const form = h("form", { class: "weather weather-edit", onsubmit: (e) => { e.preventDefault(); save(input.value.trim()); } },
+    input, unitBtn,
+    h("button", { class: "btn small solid", type: "submit" }, "Save"),
+    weatherPrefs.place ? h("button", { class: "btn small", type: "button", onclick: () => save("") }, "Turn off") : null,
+    h("button", { class: "btn small", type: "button", onclick: close }, "Cancel"),
+    msg);
+  el.replaceWith(form);
+  input.focus();
+}
+
+setInterval(() => {                       // keep the clock right while the start area is showing
+  const el = document.querySelector(".start .clock");
+  if (el) el.textContent = clockText();
+}, 20000);
+
+function startView() {
+  const [hello, sub] = slothHello();
+  const latest = (S.jobs || []).find((j) => j.status === "done" && j.brief);
+  const pick = (mode) => () => { S.mode = mode; paintComposer(true); };
+  const tiles = [
+    latest ? h("button", { class: "start-chip", onclick: () => openReader({ kind: "brief", job: latest }) },
+      h("span", { class: "k" }, "Continue"), latest.topic || latest.question) : null,
+    h("button", { class: "start-chip", onclick: pick("ask") }, h("span", { class: "k" }, "Ask"), "What do I know about…"),
+    h("button", { class: "start-chip", onclick: pick("research") }, h("span", { class: "k" }, "Research"), "Something new"),
+    h("button", { class: "start-chip", onclick: pick("note") }, h("span", { class: "k" }, "Note"), "Jot something down"),
+  ].filter(Boolean).slice(0, 4);
+  setTimeout(fillWeather, 0);
+  return h("div", { class: "start" },
+    h("div", { class: "today" }, h("span", { class: "clock" }, clockText()), weatherNode()),
+    h("div", { class: "hello" }, `🦥 ${hello}`),
+    h("div", { class: "hello-sub" }, sub),
+    h("div", { class: "start-chips" }, ...tiles),
+    S.lastThread && S.lastThread.length ? h("button", { class: "link-btn", onclick: () => {
+      S.thread = S.lastThread;
+      S.lastThread = null;
+      paintThread();
+    } }, "Continue last chat") : null);
 }
 
 function paintThread() {
   const el = document.getElementById("thread");
   if (!el) return;
   const atBottom = el.parentElement.scrollHeight - el.parentElement.scrollTop - el.parentElement.clientHeight < 80;
-  el.replaceChildren(...(S.thread.length ? S.thread.map(item) : [h("div", { class: "empty" },
-    h("div", { class: "hello" }, "What should we look into?"),
-    "Research a topic, ask your vault, or save a note. Everything lands in your vault inbox.")]));
+  el.replaceChildren(...(S.thread.length ? S.thread.map(item) : [startView()]));
   if (atBottom) el.parentElement.scrollTop = el.parentElement.scrollHeight;
 }
 
@@ -347,6 +500,7 @@ function paintThread() {
 const MODES = {
   chat: { placeholder: "Ask Sloth Lobster" },
   research: { chip: "Research", icon: "globe", placeholder: "Research a topic", path: "/api/research", key: "question" },
+  deep: { chip: "Deep", icon: "moon", placeholder: "A question to research overnight", path: "/api/research", key: "question", extra: { mode: "deep" } },
   ask: { chip: "Ask", icon: "ask", placeholder: "Ask your vault", path: "/api/ask", key: "question" },
   note: { chip: "Note", icon: "note", placeholder: "Write a note, exactly as it should be saved", path: "/api/note", key: "text" },
   save: { chip: "Save link", icon: "link", placeholder: "Paste a link to a document", path: "/api/save", key: "url" },
@@ -394,7 +548,7 @@ const submit = guard(async (raw) => {
   try {
     let r;
     try {
-      r = await api(mode.path || "/api/chat", mode.path ? { [mode.key]: text, ...(noteId ? { id: noteId } : {}) } : { text });
+      r = await api(mode.path || "/api/chat", mode.path ? { [mode.key]: text, ...(mode.extra || {}), ...(noteId ? { id: noteId } : {}) } : { text });
     } catch (e) {
       if (!(noteId && e instanceof Unreachable)) { S.thread.splice(S.thread.indexOf(wait), 1); throw e; }
       S.thread.splice(S.thread.indexOf(wait), 1);
@@ -412,6 +566,8 @@ const submit = guard(async (raw) => {
     }
     const job = (r.reply || "").match(/Research #(\d+)(?: is)? queued/);
     if (job) watch(Number(job[1]));
+    const deep = (r.reply || "").match(/Deep research #(\d+) queued/);
+    if (deep) watchPlan(Number(deep[1]));
   } finally {
     S.busySending = false;
     if (S.mode !== "chat") { S.mode = "chat"; paintComposer(); }
@@ -419,6 +575,13 @@ const submit = guard(async (raw) => {
     refreshStatus();
   }
 });
+
+function watchPlan(id) {
+  S.planWatch.add(id);
+  S.thread.push({ t: "step", live: true, job: id, text: `Deep research #${id}: drafting a plan for your OK` });
+  paintThread();
+  schedule();
+}
 
 function watch(id) {
   S.watching.add(id);
@@ -441,8 +604,10 @@ function navigation() {
     h("div", { class: "nav-label" }, "Briefs"),
     h("div", { class: "history" }, S.jobs.length ? S.jobs.slice(0, 25).map((j) => h("button", {
       class: "nav-item", title: j.question,
-      onclick: go(() => (j.brief ? openReader({ kind: "brief", job: j }) : null)),
-    }, h("span", {}, j.topic || j.question), j.status === "waiting" ? h("span", { class: "count" }, "waiting") : null))
+      onclick: go(() => (j.brief ? openReader({ kind: "brief", job: j })
+        : j.stage === "needs your OK" ? (S.thread.push({ t: "plan", job: j }), paintThread()) : null)),
+    }, h("span", {}, j.topic || j.question),
+      j.status === "waiting" ? h("span", { class: "count" }, j.mode === "deep" ? (j.stage === "needs your OK" ? "needs OK" : j.stage) : "waiting") : null))
       : h("div", { class: "hint pad" }, "Your research briefs will appear here.")),
     h("div", { class: "guard-row" }, dotButton()));
 }
@@ -450,6 +615,7 @@ function navigation() {
 const newChat = guard(async () => {
   await api("/api/new", {});
   S.thread = [];
+  S.lastThread = null;
   paintThread();
 });
 
@@ -484,7 +650,7 @@ async function statusSheet() {
         dd("Held here", `${outbox().length} waiting`),
         ...(s.doors || []).flatMap((d) => dd(`App (${d.kind})`, d.url.replace("https://", ""))),
         ...(s.wifi ? dd("Wi-Fi door", s.wifi) : []),
-        ...(s.usage ? dd("📊 This week", Object.entries({ research: "research", ask: "asks", note: "notes", review: "reviews", share: "shares", held: "held notes", chat: "chats" })
+        ...(s.usage ? dd("📊 This week", Object.entries({ research: "research", deep: "deep research", ask: "asks", note: "notes", review: "reviews", share: "shares", held: "held notes", chat: "chats" })
           .filter(([k]) => s.usage[k]).map(([k, label]) => `${s.usage[k]} ${label}`).join(" · ") || "nothing yet") : []),
         dd("Last backup", s.last_backup || "never"),
         dd("Version", s.version)),
@@ -800,7 +966,10 @@ async function start() {
   try {
     const me = await api("/api/me");
     S.csrf = me.csrf;
-    S.thread = (me.history || []).map((m) => ({ t: m.role === "user" ? "me" : "lob", text: m.content }));
+    const history = (me.history || []).map((m) => ({ t: m.role === "user" ? "me" : "lob", text: m.content }));
+    if (!S.thread.length) {               // opening the app: a fresh screen, the last chat one tap away
+      S.lastThread = history;
+    }
     const [{ jobs }, status] = await Promise.all([api("/api/research"), api("/api/status")]);
     S.jobs = jobs;
     S.status = status;

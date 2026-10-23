@@ -96,6 +96,21 @@ def unload(model: str) -> None:
         pass
 
 
+_installed = {"at": 0.0, "names": set()}
+
+
+def installed(model: str, max_age: float = 600) -> bool:
+    """Is this model downloaded? (Checked at most every 10 minutes.)"""
+    if time.time() - _installed["at"] > max_age:
+        try:
+            with _opener.open(f"{OLLAMA_URL}/api/tags", timeout=10) as r:
+                names = {m["name"] for m in json.loads(r.read()).get("models", [])}
+            _installed.update(at=time.time(), names=names | {n.removesuffix(":latest") for n in names})
+        except Exception:
+            return False
+    return model in _installed["names"]
+
+
 def alive() -> bool:
     try:
         with _opener.open(f"{OLLAMA_URL}/api/tags", timeout=5):

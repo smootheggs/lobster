@@ -313,3 +313,37 @@ a:hover { text-decoration: underline; }
 .review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .hint.small { font-size: .78rem; margin: 0; }
 .review .done { font-size: 1.05rem; margin: 24px 0 8px; }
+
+/* The start area */
+.start { display: flex; flex-direction: column; gap: 14px; padding: 12vh 4px 0; max-width: 560px; margin: 0 auto; width: 100%; }
+.start .hello { font-size: 1.7rem; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
+.start .hello-sub { font-size: 1.05rem; color: var(--text-2); margin-top: -8px; }
+.waiting { display: flex; flex-direction: column; gap: 4px; }
+.waiting-line { background: none; border: 0; padding: 2px 0; color: var(--text-2); font: inherit; font-size: .95rem; text-align: left; cursor: pointer; }
+button.waiting-line:hover { color: var(--text); }
+.start-chips { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 6px; }
+.start-chip { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 12px 14px; border-radius: var(--r-card);
+  background: var(--raised); border: 1px solid var(--line); color: var(--text); font: inherit; font-size: .92rem; cursor: pointer;
+  overflow-wrap: anywhere; min-height: 64px; }
+.start-chip:hover { border-color: var(--line-strong); }
+.start-chip .k { font-size: .76rem; color: var(--muted); }
+.link-btn { align-self: flex-start; background: none; border: 0; padding: 4px 0; color: var(--accent); font: inherit; font-size: .9rem; cursor: pointer; }
+
+.start .today { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .9rem; color: var(--muted); margin-bottom: 4px; align-items: center; }
+.start .weather.plain { background: none; border: 0; padding: 0; color: inherit; font-size: inherit; cursor: pointer; text-align: left; }
+.start .weather.plain.dim { opacity: .7; text-decoration: underline dotted; text-underline-offset: 3px; }
+.weather-edit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; width: 100%; }
+.weather-input { flex: 1 1 180px; min-width: 0; min-height: 30px; padding: 4px 12px; border-radius: var(--pill);
+  border: 1px solid var(--line-strong); background: none; }
+.weather-input:focus { outline: none; border-color: var(--muted); }
+.weather-msg { flex-basis: 100%; font-size: .82rem; color: var(--muted); }
+.weather-msg:empty { display: none; }
+.start .weather:empty { display: none; }
+
+/* A deep job's plan */
+.plan-list { margin: 6px 0 4px; padding-left: 22px; color: var(--text); font-size: .95rem; line-height: 1.5; }
+.plan-list li { margin: 2px 0; }
+.plan-edit { width: 100%; box-sizing: border-box; background: var(--surface-2, #111); color: var(--text); border: 1px solid var(--line, #333);
+  border-radius: 12px; padding: 10px 12px; font: inherit; font-size: .95rem; resize: vertical; margin: 6px 0; }
+.ask.plan .row { flex-wrap: wrap; }
+.btn svg { width: 15px; height: 15px; vertical-align: -2px; }

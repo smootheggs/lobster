@@ -40,6 +40,15 @@ MODEL_THREADS = int(os.getenv("MODEL_THREADS", "0") or 0)  # 0: Ollama decides; 
 MODEL_CTX = 4096          # one window size for every call: changing it makes Ollama reload the model
 MODEL_THINK = os.getenv("MODEL_THINK", "").lower()          # "off" turns off thinking (Qwen3); else unset
 
+# --- Deep research: runs overnight with a bigger writer (ollama pull qwen2.5:7b, about 4.7 GB) ---
+DEEP_WRITER_MODEL = os.getenv("DEEP_WRITER_MODEL", "qwen2.5:7b")   # falls back to WRITER_MODEL if not pulled
+DEEP_HOURS = os.getenv("DEEP_HOURS", "23-6")                 # local hours when approved deep jobs run
+DEEP_MAX_MINUTES = int(os.getenv("DEEP_MAX_MINUTES", "60") or 60)   # collecting stops here; the brief is still written
+
+# --- Weather on the start screen (optional): a city name, looked up once; °F unless you choose celsius ---
+WEATHER_PLACE = os.getenv("WEATHER_PLACE", "").strip()
+WEATHER_UNITS = "celsius" if os.getenv("WEATHER_UNITS", "").lower().startswith("c") else "fahrenheit"
+
 # --- Offline Wikipedia: Kiwix .zim files (wikipedia_<lang>_..._YYYY-MM.zim) read straight from disk ---
 KIWIX_DIR = Path(os.getenv("KIWIX_DIR", "/storage/emulated/0/Kiwix"))
 
@@ -87,7 +96,7 @@ WEB_KEY = os.getenv("WEB_KEY", "")
 # --- Schedules ---
 DIGEST_ON_CHARGE = os.getenv("DIGEST_ON_CHARGE", "1") == "1"
 
-VERSION = "2026-10-22.29"
+VERSION = "2026-10-23.30.1"
 
 import store  # noqa: E402  (after the paths above are known)
 store.set_timings_file(DATA_DIR / "timings.jsonl")

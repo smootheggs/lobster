@@ -7,7 +7,7 @@ import time
 import shiba
 from store import read_jsonl_tail
 
-LABELS = [("research", "research"), ("ask", "asks"), ("note", "notes"), ("review", "reviews"),
+LABELS = [("research", "research"), ("deep", "deep research"), ("ask", "asks"), ("note", "notes"), ("review", "reviews"),
           ("share", "shares"), ("held", "held notes"), ("chat", "chats")]
 
 
@@ -20,7 +20,7 @@ def tally(days: int = 7) -> dict[str, int]:
             continue
         kind, action = r.get("kind"), r.get("action")
         if kind == "research_queued":
-            counts["research"] += 1
+            counts["deep" if r.get("mode") == "deep" else "research"] += 1
         elif kind == "decision" and r.get("verdict") == "ALLOW" and action in ("ask", "save_note", "reply"):
             counts[{"ask": "ask", "save_note": "note", "reply": "chat"}[action]] += 1
         elif kind == "card_reviewed":

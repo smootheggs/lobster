@@ -281,7 +281,12 @@ class App:
 
     # GET /api/...
     def me(self, s, q):
-        return {"csrf": s["csrf"], "version": config.VERSION, "history": conversation.load_session()["history"]}
+        try:                                     # how long the chat has been quiet: the app starts fresh after 2 h
+            idle = int(time.time() - conversation.SESSION.stat().st_mtime)
+        except OSError:
+            idle = None
+        return {"csrf": s["csrf"], "version": config.VERSION, "history": conversation.load_session()["history"],
+                "idle_seconds": idle}
 
     def status(self, s, q):
         st = memory.stats()
@@ -289,7 +294,7 @@ class App:
         return {"model_up": ollama.alive(), "model": config.MODEL, "owner_facts": st["owner"],
                 "web_facts": st["web"], "cards": st["cards"], "unreviewed": st["unreviewed"],
                 "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(),
-                "research_waiting": len(research.pending()), "now": self.now(), "busy": self.busy(),
+                "research_waiting": research.waiting_now(), "now": self.now(), "busy": self.busy(),
                 "last_backup": memory.last_backup(), "research_seconds": t.get("research"),
                 "online": spider.online(), "ollama": ollama.version_problem(), "reply_speed": ollama.speed("chat"), "usage": usage.tally(), "offline_wiki": [z.copy for z in zim.library(config.KIWIX_DIR)],
                 "doors": self.doors.urls() if self.doors else [],
@@ -363,7 +368,22 @@ class App:
 
     def research_new(self, s, body):
         self._mark(body, "research")
-        return {"reply": conversation.research(self._text(body, "question", 500) or "")}
+        question = self._text(body, "question", 500) or ""
+        if body.get("mode") == "deep":
+            return {"reply": conversation.deep(question)}
+        return {"reply": conversation.research(question)}
+
+    def research_plan(self, s, body):
+        """A deep job's plan: OK it (tonight / now), cancel it, or replace its sub-questions."""
+        job_id = str(body.get("id", ""))[:10]
+        lines = body.get("lines")
+        if isinstance(lines, list):
+            lines = [x[:200] for x in lines[:8] if isinstance(x, str)]
+            return {"reply": conversation.deep_edit(job_id, lines)}
+        choice = str(body.get("choice", ""))
+        if choice not in ("night", "now", "cancel"):
+            return {"reply": "Unknown choice."}
+        return {"reply": conversation.deep_choice(job_id, choice)}
 
     def ask(self, s, body):
         q = self._text(body, "question", 500) or ""
@@ -408,6 +428,15 @@ class App:
                  "unreviewed": "back to review"}
         return {"ok": ok, "reply": f"🐘 Marked: {words[status]}." if ok else "Couldn't find that card in your vault."}
 
+    def weather(self, s, q):
+        return {"weather": spider.weather(), **spider.weather_settings()}
+
+    def weather_set(self, s, body):
+        problem = spider.set_weather(str(body.get("place", ""))[:200], str(body.get("units", "fahrenheit")))
+        if problem:
+            return {"ok": False, "reply": problem, **spider.weather_settings()}
+        return {"ok": True, "weather": spider.weather(), **spider.weather_settings()}
+
     def review_queue(self, s, q):
         return {"cards": elephant.review_queue()}
 
@@ -428,11 +457,11 @@ class App:
         return {"reply": f"Logged out everywhere ({n} session{'s' if n != 1 else ''})."}
 
     GETS = {"/api/me": me, "/api/status": status, "/api/research": research_list, "/api/cards": cards_list,
-            "/api/library": library, "/api/review_queue": review_queue, "/api/memory": memory_search, "/api/audit": audit_list}
-    POSTS = {"/api/chat": chat, "/api/approve": approve, "/api/cancel": cancel, "/api/research": research_new,
+            "/api/library": library, "/api/review_queue": review_queue, "/api/weather": weather, "/api/memory": memory_search, "/api/audit": audit_list}
+    POSTS = {"/api/chat": chat, "/api/approve": approve, "/api/cancel": cancel, "/api/research": research_new, "/api/research/plan": research_plan,
              "/api/ask": ask, "/api/note": note, "/api/save": save, "/api/stop": stop, "/api/new": new,
              "/api/review": review, "/api/pause": pause, "/api/resume": resume, "/api/logout": logout,
-             "/api/logout_all": logout_all}
+             "/api/logout_all": logout_all, "/api/weather": weather_set}
 
 
 def make_handler(app: App):

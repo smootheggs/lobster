@@ -46,12 +46,23 @@ def research_topic(text: str) -> str:
     return f"🦞 On it. Research #{job_id} queued; the brief lands here in a few minutes. /stop cancels it."
 
 
+def deep_research(text: str) -> str:
+    if not text.strip():
+        return "What should I research in depth?"
+    job_id = research.enqueue(text.strip(), mode="deep")
+    return (f"🐘 Deep research #{job_id} queued. I'll draft a plan for your OK in a minute; "
+            f"once you OK it, it runs tonight ({research.window_text()}) with the bigger writer.")
+
+
+# "model": False keeps an action out of the model's menu: only you can start it (/deep).
 ACTIONS = {
     "reply":      {"fn": None,           "tier": "read",  "desc": "just talk; no action"},
     "ask":        {"fn": ask,            "tier": "read",  "desc": "answer from the owner's vault and notes; text = the question"},
     "list_notes": {"fn": list_notes,     "tier": "read",  "desc": "show recent notes"},
     "save_note":  {"fn": save_note,      "tier": "write", "desc": "save a note or a fact about the owner; text = the note"},
     "research":   {"fn": research_topic, "tier": "write", "desc": "research a topic on the web and send a brief; text = the question"},
+    "deep_research": {"fn": deep_research, "tier": "write", "model": False,
+                      "desc": "plan a long overnight research job for the owner's OK; text = the question"},
 }
 
 

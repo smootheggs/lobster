@@ -18,11 +18,12 @@ import time
 import urllib.error
 import urllib.request
 import urllib.robotparser
+from pathlib import Path
 from urllib.parse import quote, unquote, urlencode, urlparse
 
 import shiba
 import zim
-from config import CACHE_DIR, CONTACT, KIWIX_DIR, LIBRARY_DIR, PROXY
+from config import CACHE_DIR, CONTACT, DATA_DIR, KIWIX_DIR, LIBRARY_DIR, PROXY, WEATHER_PLACE, WEATHER_UNITS
 from store import write_atomic
 
 MAX_BYTES = 2_000_000          # pages: anything longer is cut
@@ -48,6 +49,8 @@ PROVIDERS = {                       # the only places research ever reads from
     "wikipedia": "https://en.wikipedia.org/w/api.php",
     "wikipedia_page": "https://en.wikipedia.org/wiki/",
     "news": "https://news.google.com/rss/search",
+    "weather": "https://api.open-meteo.com/v1/forecast",           # the start screen's weather only
+    "geocode": "https://geocoding-api.open-meteo.com/v1/search",
 }
 PER_SEARCH = 3                      # search results looked at per phrase
 
@@ -201,6 +204,108 @@ def online(max_age: float = 60) -> bool:
     return up
 
 
+# --- Weather for the start screen (Open-Meteo: free, no key) -------------------------------
+# Only your city's name is sent (once, to find it on the map), then its coordinates rounded to
+# about a kilometre. Cached for 30 minutes; offline, the last reading is shown for up to 3 hours.
+
+WMO = [((0,), "☀️", "clear"), ((1, 2), "⛅", "partly cloudy"), ((3,), "☁️", "cloudy"), ((45, 48), "🌫️", "fog"),
+       (tuple(range(51, 58)), "🌦️", "drizzle"), (tuple(range(61, 68)) + (80, 81, 82), "🌧️", "rain"),
+       (tuple(range(71, 78)) + (85, 86), "🌨️", "snow"), ((95, 96, 99), "⛈️", "thunderstorms")]
+_weather: dict = {"at": 0.0, "data": None}
+
+# The place and units can be set in the app (kept in data/settings.json); .env gives the starting
+# values. A place is a name and nothing else: letters, spaces and a little punctuation.
+PLACE_OK = re.compile(r"^[^\W\d_][\w .,'’()-]{0,59}$")
+UNITS = ("fahrenheit", "celsius")
+
+
+def _settings_path() -> Path:
+    return DATA_DIR / "settings.json"
+
+
+def weather_settings() -> dict:
+    """{"place", "units"}: what the app set, else .env."""
+    try:
+        saved = json.loads(_settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    place = saved.get("weather_place", WEATHER_PLACE)
+    units = saved.get("weather_units", WEATHER_UNITS)
+    return {"place": place if isinstance(place, str) else "", "units": units if units in UNITS else "fahrenheit"}
+
+
+def set_weather(place: str, units: str) -> str | None:
+    """Save the start screen's weather place and units. Returns why not, or None when saved.
+    An empty place turns the weather off."""
+    place = " ".join(str(place or "").split())
+    if units not in UNITS:
+        return "Units must be fahrenheit or celsius."
+    if place and (not PLACE_OK.match(place) or "://" in place or "www." in place.lower()):
+        return "Just a place name, please (letters, spaces, commas; up to 60 characters)."
+    try:
+        saved = json.loads(_settings_path().read_text(encoding="utf-8"))
+        saved = saved if isinstance(saved, dict) else {}
+    except (OSError, ValueError):
+        saved = {}
+    saved.update(weather_place=place, weather_units=units)
+    _settings_path().parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(_settings_path(), json.dumps(saved, ensure_ascii=False))
+    _weather.update(at=0.0, data=None)
+    shiba.audit("weather_set", place=place, units=units)
+    return None
+
+
+def _place(query: str) -> dict | None:
+    path = CACHE_DIR / "weather_place.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved.get("query") == query:
+            return saved
+    except (OSError, ValueError):
+        pass
+    page = fetch(f"{PROVIDERS['geocode']}?{urlencode({'name': query, 'count': 1})}", _opener(), robots=False)
+    hits = json.loads(page["content"]).get("results") or []
+    if not hits:
+        return None
+    h = hits[0]
+    place = {"query": query, "name": str(h.get("name", ""))[:60],
+             "lat": round(float(h["latitude"]), 2), "lon": round(float(h["longitude"]), 2)}
+    write_atomic(path, json.dumps(place))
+    return place
+
+
+def weather(max_age: float = 1800) -> dict | None:
+    """{"icon", "temp", "high", "low", "text", "place", "unit"} for the chosen place, or None."""
+    chosen = weather_settings()
+    if not chosen["place"]:
+        return None
+    if time.time() - _weather["at"] < max_age and _weather["data"]:
+        return _weather["data"]
+    try:
+        place = _place(chosen["place"])
+        if not place:
+            return None
+        q = {"latitude": place["lat"], "longitude": place["lon"], "current": "temperature_2m,weather_code,is_day",
+             "daily": "temperature_2m_max,temperature_2m_min", "temperature_unit": chosen["units"],
+             "timezone": "auto", "forecast_days": 1}
+        d = json.loads(fetch(f"{PROVIDERS['weather']}?{urlencode(q)}", _opener(), robots=False)["content"])
+        code = int(d["current"]["weather_code"])
+        icon, text = next(((i, t) for codes, i, t in WMO if code in codes), ("🌡️", ""))
+        if icon == "☀️" and not d["current"].get("is_day", 1):
+            icon = "🌙"
+        unit = "°F" if chosen["units"] == "fahrenheit" else "°C"
+        data = {"icon": icon, "text": text, "temp": round(float(d["current"]["temperature_2m"])),
+                "high": round(float(d["daily"]["temperature_2m_max"][0])),
+                "low": round(float(d["daily"]["temperature_2m_min"][0])), "place": place["name"], "unit": unit}
+        _weather.update(at=time.time(), data=data)
+        return data
+    except Exception:
+        stale = _weather["data"] if time.time() - _weather["at"] < 3 * 3600 else None
+        return stale
+
+
 # --- Offline Wikipedia (a Kiwix file on the tablet; no network, no server) ---------------
 
 def offline_available() -> bool:
@@ -229,14 +334,15 @@ def _wiki_api(params: dict) -> str:
     return PROVIDERS["wikipedia"] + "?" + urlencode(dict(params, format="json", formatversion=2))
 
 
-def wikipedia(phrases: list[str], limit: int, should_stop=None) -> dict:
+def wikipedia(phrases: list[str], limit: int, should_stop=None, skip=None) -> dict:
     """Search Wikipedia for each phrase and fetch the articles' plain text.
 
+    skip: titles already read (not fetched again).
     Returns {"articles": [{"title", "url", "text", "fetched_at", "sha256"}], "failed": [...],
-             "network_errors": n}. The phrases are words only; URLs are built here, by code.
+             "network_errors": n, "empty": [phrases that found nothing]}. The phrases are words only; URLs are built here, by code.
     """
     opener = _opener()
-    articles, failed, seen, network_errors = [], [], set(), 0
+    articles, failed, seen, network_errors, empty = [], [], set(skip or ()), 0, []
     for phrase in phrases:
         if len(articles) >= limit or (should_stop and should_stop()):
             break
@@ -246,6 +352,8 @@ def wikipedia(phrases: list[str], limit: int, should_stop=None) -> dict:
                                     gap=API_GAP)["content"])
             titles = [h["title"] for h in hits.get("query", {}).get("search", [])
                       if isinstance(h, dict) and isinstance(h.get("title"), str)]
+            if not titles:
+                empty.append(phrase)               # a search that found nothing, not a failure
         except Refused as e:
             failed.append(f"search '{phrase}': {e}")
             continue
@@ -269,7 +377,7 @@ def wikipedia(phrases: list[str], limit: int, should_stop=None) -> dict:
                 articles.append({"title": article["title"], "text": text,
                                  "url": PROVIDERS["wikipedia_page"] + quote(article["title"].replace(" ", "_")),
                                  "fetched_at": page["fetched_at"], "sha256": page["sha256"]})
-    return {"articles": articles, "failed": failed, "network_errors": network_errors}
+    return {"articles": articles, "failed": failed, "network_errors": network_errors, "empty": empty}
 
 
 def news(phrase: str) -> dict:

@@ -203,12 +203,22 @@ def write_source(source_id: str, title: str, url: str, fetched: str, card_titles
 
 
 def write_map(map_id: str, title: str, question: str, job: int, points: list[tuple[str, int]],
-              sources: list[str], loci: list[str]) -> Path:
+              sources: list[str], loci: list[str], sections: list | None = None,
+              bottom: list[str] | None = None) -> Path:
+    """sections (optional): [(sub-question, summary, [(card title, source number)])], so the map
+    follows the brief's outline; without them, one list of points."""
     props = {"id": map_id, "type": "map", "loci": loci, "status": "unreviewed", "made_by": "lobster",
              "question": question, "research_job": job, "created": today(), "card_version": CARD_VERSION}
-    lines = "\n".join(f"- {link(t)} [{n}]" for t, n in points)
     srcs = "\n".join(f"{i}. {link(s)}" for i, s in enumerate(sources, 1))
-    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\nQuestion: {question}\n\n## Points\n{lines}\n\n## Sources\n{srcs}\n\n"
+    if sections:
+        blocks = []
+        for q, summary, pts in sections:
+            lines = "\n".join(f"- {link(t)} [{n}]" for t, n in pts)
+            blocks.append(f"## {safe_title(q, 120)}\n" + (f"{summary}\n\n" if summary else "") + (lines or "_Little found._"))
+        middle = (f"## Bottom line\n{' '.join(bottom)}\n\n" if bottom else "") + "\n\n".join(blocks)
+    else:
+        middle = "## Points\n" + "\n".join(f"- {link(t)} [{n}]" for t, n in points)
+    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\nQuestion: {question}\n\n{middle}\n\n## Sources\n{srcs}\n\n"
             "Gathered by Sloth Lobster from the web, not written by you. Review each card before relying on it.\n")
     return _write_new(title, frontmatter(props) + body)
 

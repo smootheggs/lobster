@@ -11,12 +11,15 @@ import json
 import memory
 import ollama
 from actions import ACTIONS
+
+# What the model may choose from. Actions marked "model": False (deep research) are yours alone.
+MODEL_ACTIONS = {name: spec for name, spec in ACTIONS.items() if spec.get("model", True)}
 from config import CHAT_KEEP_ALIVE, IDENTITY, MODEL
 
 SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": list(ACTIONS)},
+        "action": {"type": "string", "enum": list(MODEL_ACTIONS)},
         "text": {"type": "string"},
         "reply": {"type": "string"},
     },
@@ -25,7 +28,7 @@ SCHEMA = {
 
 
 def _system_prompt(facts: list[dict]) -> str:
-    menu = "\n".join(f"- {name}: {spec['desc']}" for name, spec in ACTIONS.items())
+    menu = "\n".join(f"- {name}: {spec['desc']}" for name, spec in MODEL_ACTIONS.items())
     prompt = f"{IDENTITY}\n\nAvailable actions:\n{menu}\n"
     owner = [f["text"] for f in facts if f["tag"] == "owner"]
     web = [f"{f['text']} (source: {f['source']}, {f['added']})" for f in facts if f["tag"] == "web"]
@@ -52,7 +55,7 @@ def _think_sync(history: list[dict]) -> dict:
         decision = json.loads(content)
     except json.JSONDecodeError:
         decision = {"action": "reply", "text": "", "reply": content}
-    if decision.get("action") not in ACTIONS:  # belt and braces
+    if decision.get("action") not in MODEL_ACTIONS:  # belt and braces
         decision["action"] = "reply"
     decision.setdefault("text", "")
     decision.setdefault("reply", "")

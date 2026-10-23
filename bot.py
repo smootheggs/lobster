@@ -50,6 +50,8 @@ BUSY = "🐘 The Elephant is digesting, so replies may be a little slow."
 
 COMMANDS_MENU = [                  # what Telegram shows when you type /
     ("research", "Research a topic; the brief and cards land in your vault"),
+    ("deep", "Deep research: you OK a plan, it runs overnight"),
+    ("plan", "See or change a deep research plan: /plan 7"),
     ("ask", "Answer from your vault only, with sources"),
     ("note", "Save a note exactly as typed"),
     ("save", "Keep a document (e.g. an annual report) with a receipt"),
@@ -61,12 +63,34 @@ COMMANDS_MENU = [                  # what Telegram shows when you type /
 ]
 
 
+def split_message(text: str, limit: int = 4000) -> list[str]:
+    """Telegram takes at most 4096 characters per message: split long briefs between paragraphs."""
+    parts, cur = [], ""
+    for para in text.split("\n\n"):
+        while len(para) > limit:                 # one huge paragraph: split between lines
+            cut = para.rfind("\n", 0, limit)
+            cut = cut if cut > 0 else limit
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(para[:cut])
+            para = para[cut:].lstrip("\n")
+        if cur and len(cur) + 2 + len(para) > limit:
+            parts.append(cur)
+            cur = para
+        else:
+            cur = f"{cur}\n\n{para}" if cur else para
+    if cur:
+        parts.append(cur)
+    return parts or [""]
+
+
 def _title(url: str) -> str:
     return unquote(url.rstrip("/").rsplit("/", 1)[-1]).replace("_", " ")[:60] or "page"
 
 
 def now_line() -> str:
-    waiting = len(research.pending())
+    waiting = research.waiting_now()
     extra = f" · {waiting} research job{'s' if waiting != 1 else ''} waiting" if waiting else ""
     return f"⏳ Now: {state['now']}{extra}"
 
@@ -116,6 +140,12 @@ def _arg(update: Update, ctx) -> str:
     return text.partition(" ")[2].strip() if " " in text else " ".join(ctx.args or [])
 
 
+def plan_buttons(job_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🌙 OK, tonight", callback_data=f"deep:{job_id}:night"),
+                                  InlineKeyboardButton("▶️ Run now", callback_data=f"deep:{job_id}:now")],
+                                 [InlineKeyboardButton("❌ Cancel", callback_data=f"deep:{job_id}:cancel")]])
+
+
 def approval_buttons(code: str, label: str = "Yes") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ {label}", callback_data=f"ok:{code}"),
                                   InlineKeyboardButton("❌ No", callback_data=f"no:{code}")]])
@@ -153,7 +183,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
     choice, _, code = (query.data or "").partition(":")
-    if choice == "no":
+    if choice == "deep":
+        job_id, _, what = code.partition(":")
+        if what in ("night", "now", "cancel"):
+            await _edit(query, f"{query.message.text}\n\n" + await asyncio.to_thread(conversation.deep_choice, job_id, what))
+        else:
+            await _edit(query, "Unknown button.")
+    elif choice == "no":
         await _edit(query, conversation.cancel(code))
     elif choice == "ok":
         await _edit(query, await conversation.approve(code))
@@ -197,6 +233,21 @@ async def cmd_research(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @owner_only
+async def cmd_deep(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(await asyncio.to_thread(conversation.deep, _arg(update, ctx)))
+
+
+@owner_only
+async def cmd_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/plan 7 shows the plan with its buttons; /plan 7 + lines changes it first."""
+    arg = _arg(update, ctx)
+    msg = await asyncio.to_thread(conversation.plan_command, arg)
+    number = arg.split()[0] if arg.split() else ""
+    show = msg.startswith("🐘 Plan for deep research") and number.isdigit()
+    await update.message.reply_text(msg, reply_markup=plan_buttons(int(number)) if show else None)
+
+
+@owner_only
 async def cmd_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     url = _arg(update, ctx)
     if url and not shiba.paused():
@@ -213,7 +264,8 @@ def status_lines() -> list[str]:
     return [
         f"🧠 Model: {'running' if ollama.alive() else 'DOWN'} ({config.MODEL})" + speed_note(),
         f"🐘 Memory: {s['owner']} of your facts, {s['web']} web facts · {s['cards']} cards, {s['unreviewed']} to review",
-        f"🕷️ {len(research.pending())} research job(s) waiting{speed}",
+        f"🕷️ {research.waiting_now()} research job(s) waiting{speed}" + (
+            f" · {n} deep job(s) for tonight" if (n := sum(j['mode'] == 'deep' for j in research.pending())) else ""),
         f"🐕 Shiba: {'⏸️ PAUSED' if shiba.paused() else 'on guard'}, {shiba.blocks_last_day()} blocked in 24h",
         f"🔌 Charging: {'yes' if charging else 'no' if charging is not None else 'unknown (backups still run daily)'}",
         now_line(),
@@ -256,7 +308,7 @@ async def cmd_unknown(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(conversation.command(update.message.text or "/") or conversation.COMMAND_HELP)
 
 
-COMMANDS = {"research": cmd_research, "ask": cmd_ask, "note": cmd_note, "save": cmd_save,
+COMMANDS = {"research": cmd_research, "deep": cmd_deep, "plan": cmd_plan, "ask": cmd_ask, "note": cmd_note, "save": cmd_save,
             "status": cmd_status, "stop": cmd_stop, "new": cmd_new, "pause": cmd_pause, "resume": cmd_resume}
 
 
@@ -296,7 +348,7 @@ async def run_digest(bot=None, background: bool = False) -> str:
     """Digest leftover pages (e.g. /save documents). Stops between pages if research is waiting."""
     if shiba.paused() or digest_lock.locked():
         return ""
-    stop = (lambda: bool(research.pending())) if background else None
+    stop = (lambda: bool(research.waiting_now())) if background else None
     async with digest_lock:
         state["now"] = "🐘 Indexing saved documents"
         try:
@@ -310,40 +362,66 @@ async def run_digest(bot=None, background: bool = False) -> str:
 
 
 async def run_research_jobs(app) -> None:
-    """Work through queued research jobs, one at a time."""
+    """Work through research jobs, one at a time: quick jobs whenever they come, a plan for each
+    new deep job straight away, and approved deep jobs at night (they step aside for quick ones)."""
     if shiba.paused() or research_lock.locked():
         return
     async with research_lock:
         while not shiba.paused():
-            waiting = research.pending()
-            if not waiting:
+            charging = await asyncio.to_thread(is_charging)
+            job, what = await asyncio.to_thread(research.next_job, None, charging)
+            if job is None:
+                if what:
+                    state["now"] = what
+                    if what.startswith("🔌"):
+                        await notify_once(app.bot, ("charger", time.strftime("%Y-%m-%d")),
+                                          f"{what}: plug the tablet in and it starts by itself.")
+                elif state["now"].startswith(("🌙", "🔌", "🐘 Deep research")):
+                    state["now"] = "idle"
                 break
-            job = waiting[0]
+            send = app.bot.send_message
+            if what == "plan":
+                state["now"] = f"🐘 Deep research #{job['id']}: drafting a plan"
+                try:
+                    p = await asyncio.to_thread(research.make_plan, job)
+                finally:
+                    state["now"] = "idle"
+                await send(config.ALLOWED_USER_ID, research.plan_text(job["id"], job["question"], p["sections"]),
+                           reply_markup=plan_buttons(job["id"]))
+                continue
             if not await asyncio.to_thread(spider.online) and not await asyncio.to_thread(spider.offline_available):
-                state["now"] = f"🦞 Offline: {len(waiting)} research job(s) wait for the internet"
+                state["now"] = f"🦞 Offline: research #{job['id']} waits for the internet"
                 return                               # tried again every 15 s; runs by itself when back
             research.STOP.clear()
-            send = app.bot.send_message
             loop = asyncio.get_running_loop()
+            deep = job["mode"] == "deep"
 
             def say(text, job_id=job["id"]):
                 who, _, rest = text.partition(" ")      # "🕷️ Out collecting: …" -> the app's live step
                 if who and rest and not who.isalnum():
                     state["now"] = f"{who} Research #{job_id}: {rest[:1].lower()}{rest[1:]}"
-                asyncio.run_coroutine_threadsafe(send(config.ALLOWED_USER_ID, f"#{job_id} {text}"), loop)
+                if not deep or rest.startswith(("Deep research", "Round 1", "Writing")):
+                    asyncio.run_coroutine_threadsafe(send(config.ALLOWED_USER_ID, f"#{job_id} {text}"), loop)
 
             def page_done(i, n, url, job_id=job["id"]):
                 state["now"] = f"🐘 Research #{job_id}: reading {i} of {n} articles"
-                asyncio.run_coroutine_threadsafe(
-                    send(config.ALLOWED_USER_ID, f"🐘 #{job_id}: {i}/{n} read ({_title(url)})"), loop)
+                if not deep:
+                    asyncio.run_coroutine_threadsafe(
+                        send(config.ALLOWED_USER_ID, f"🐘 #{job_id}: {i}/{n} read ({_title(url)})"), loop)
 
-            await send(config.ALLOWED_USER_ID, f"🕷️ Researching #{job['id']}: {job['question']}")
+            def quick_waiting():
+                return any(j["mode"] != "deep" for j in research.pending())
+
+            if not deep:
+                await send(config.ALLOWED_USER_ID, f"🕷️ Researching #{job['id']}: {job['question']}")
             async with digest_lock:                  # waits for a running document digest
                 state["now"] = f"🕷️ Research #{job['id']}: collecting"
                 try:
-                    r = await asyncio.to_thread(research.run_job, job, say, page_done)
+                    r = await asyncio.to_thread(research.run_job, job, say, page_done, quick_waiting)
                 finally:
                     state["now"] = "idle"
+            if r["status"] == "yield":
+                continue                             # a quick job goes first; the deep one keeps its place
             if r["status"] == "offline":
                 await notify_once(app.bot, ("net", job["id"]),
                                   f"🦞 We're offline, so research #{job['id']} waits here until we're back.")
@@ -360,7 +438,8 @@ async def run_research_jobs(app) -> None:
             if r.get("suspicious"):
                 await alert(app.bot, "rejected several instruction-like sentences from:\n" + "\n".join(r["suspicious"]))
             conversation.mark_tainted()              # the brief is web content: be cautious for a few turns
-            await send(config.ALLOWED_USER_ID, r["brief"])
+            for part in split_message(r["brief"]):
+                await send(config.ALLOWED_USER_ID, part)
 
 
 WEEKLY_FILE = config.DATA_DIR / "usage_week.txt"
@@ -404,7 +483,7 @@ async def background(app: Application) -> None:
                     log.info(await run_backup())
                     await asyncio.to_thread(elephant.retry_failed)
             if config.DIGEST_ON_CHARGE and (charging or charging is None) and spider.inbox_count() \
-                    and not research.pending():
+                    and not research.waiting_now():
                 msg = await run_digest(app.bot, background=True)
                 if msg:
                     await app.bot.send_message(config.ALLOWED_USER_ID, msg)

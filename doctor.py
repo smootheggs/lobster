@@ -73,6 +73,10 @@ def checks() -> list[tuple[bool, str]]:
         have |= {n.removesuffix(":latest") for n in have}
         for m in dict.fromkeys([config.MODEL, config.WRITER_MODEL, config.EMBED_MODEL]):
             add(m in have, f"Model {m} is installed", f"Model {m} is missing → ollama pull {m}")
+        deep = config.DEEP_WRITER_MODEL
+        if deep and deep != config.WRITER_MODEL:
+            add(deep in have, f"Deep research writer {deep} is installed (overnight, {config.DEEP_HOURS} h)",
+                f"Deep research will write with {config.WRITER_MODEL}: for the bigger writer, ollama pull {deep} (about 4.7 GB)")
         problem = ollama.version_problem(max_age=0)
         add(not problem, "Ollama is up to date", f"{problem}")
     safely("Ollama", models)
