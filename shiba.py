@@ -22,7 +22,7 @@ from collections import deque
 from urllib.parse import urlparse
 
 from config import BASE_DIR, DATA_DIR, PROXY
-from store import append_jsonl, read_jsonl, write_atomic
+from store import append_jsonl, read_jsonl, read_jsonl_tail, write_atomic
 
 ALLOW, ASK, BLOCK = "ALLOW", "ASK", "BLOCK"
 
@@ -57,7 +57,8 @@ def audit(kind: str, **fields) -> None:
 
 
 def recent(n: int = 8) -> list[dict]:
-    return read_jsonl(AUDIT)[-n:]
+    """The newest audit lines (reads only the end of the log, so status stays quick)."""
+    return read_jsonl_tail(AUDIT, 1_000_000)[-n:]
 
 
 def blocks_last_day() -> int:

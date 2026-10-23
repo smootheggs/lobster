@@ -164,12 +164,23 @@ def today() -> str:
 
 
 def write_card(card_id: str, title: str, claim: str, evidence: str, source_title: str, fetched: str,
-               map_title: str, loci: list[str]) -> Path:
+               map_title: str, loci: list[str], about: str = "", question: str = "", section: str = "") -> Path:
+    """Card guide v2 adds context: what the card is about, the question it answers and the part
+    of the source it comes from. v1 cards are never rewritten."""
     props = {"id": card_id, "type": "card", "loci": loci, "status": "unreviewed", "made_by": "lobster",
              "sources": [link(source_title)], "maps": [link(map_title)], "created": today(),
-             "card_version": CARD_VERSION}
+             "card_version": CARD_VERSION + 1}
+    if about:
+        props["about"] = about
+    if question:
+        props["question"] = question[:200]
+    if section:
+        props["section"] = section[:80]
     quote = "\n".join(f"> {line}" for line in evidence.splitlines() if line.strip())
-    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\n{claim}\n\n{quote}\n> — {link(source_title)}, fetched {fetched[:10]}\n")
+    where = " · ".join(p for p in (f"About **{about}**" if about else "", f"section *{section}*" if section else "") if p)
+    context = (f"{where}\n" if where else "") + (f"Answers: {question[:200]}\n" if question else "")
+    body = (f"# {safe_title(title, TITLE_LIMIT + 8)}\n\n" + (context + "\n" if context else "")
+            + f"{claim}\n\n{quote}\n> — {link(source_title)}, fetched {fetched[:10]}\n")
     return _write_new(title, frontmatter(props) + body)
 
 

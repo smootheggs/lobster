@@ -110,15 +110,40 @@ def allowed_address(ip: str) -> bool:
     return a.version == 4 and any(a in ipaddress.ip_network(n) for n in PRIVATE_NETS) and not a.is_unspecified
 
 
+RENEW_DAYS = 30                                 # renew this long before a certificate expires
+
+
+def days_left(cert: Path) -> int | None:
+    """Whole days until a certificate expires (None if it can't be read)."""
+    import datetime as dt
+    r = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-enddate"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or "=" not in r.stdout:
+        return None
+    try:
+        end = dt.datetime.strptime(r.stdout.strip().split("=", 1)[1], "%b %d %H:%M:%S %Y %Z")
+    except ValueError:
+        return None
+    return (end - dt.datetime.utcnow()).days
+
+
+def expiring(cert: Path, days: int = RENEW_DAYS) -> bool:
+    """True if the certificate expires within `days` (or can't be read)."""
+    r = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-checkend", str(days * 86400)],
+                       capture_output=True, timeout=30)
+    return r.returncode != 0
+
+
 def leaf(addresses: list[str]) -> tuple[Path, Path]:
-    """The server certificate for exactly these addresses, re-issued only when they change."""
+    """The server certificate for exactly these addresses: re-issued when they change, and
+    renewed by itself a month before it expires (browsers stop trusting it after 397 days)."""
     ensure_ca()
     ips = sorted({a for a in addresses if allowed_address(a)}, key=ipaddress.ip_address)
     if not ips:
         raise CertError("no private address to certify")
     tag = hashlib.sha256((",".join(ips)).encode()).hexdigest()[:12]
     key, cert = TLS_DIR / f"server-{tag}.key", TLS_DIR / f"server-{tag}.crt"
-    if key.exists() and cert.exists():
+    if key.exists() and cert.exists() and not expiring(cert):
         return cert, key
     csr = TLS_DIR / f"server-{tag}.csr"
     ext = TLS_DIR / f"server-{tag}.ext"

@@ -556,9 +556,32 @@ def _():
     props = vault.read_frontmatter(path)
     assert props["loci"] == ["world history", "markets and trading"] and props["status"] == "unreviewed"
     assert props["sources"] == ["[[Hanseatic League (Wikipedia)]]"] and props["maps"] == ["[[Hanseatic League]]"]
-    assert props["made_by"] == "lobster" and props["card_version"] == "1" and props["created"]
+    assert props["made_by"] == "lobster" and props["card_version"] == "2" and props["created"]
     assert "\n# Lübeck led the Hanseatic League\n\nLübeck was the leading city.\n\n> Before." in text
     assert "> — [[Hanseatic League (Wikipedia)]], fetched 2026-10-22" in text
+    # Card guide v2: context, when it's known
+    path = vault.write_card("lb-ftest1b", "Its rule ended at Bosworth", "Its rule ended at Bosworth.",
+                            "Before. Its rule ended at Bosworth. After.", "House of Plantagenet (Wikipedia)",
+                            "2026-10-22", "English kings", [], about="House of Plantagenet",
+                            question="Who were the English kings?", section="Decline")
+    props, text = vault.read_frontmatter(path), path.read_text(encoding="utf-8")
+    assert props["about"] == "House of Plantagenet" and props["section"] == "Decline", props
+    assert "About **House of Plantagenet** · section *Decline*\nAnswers: Who were the English kings?" in text
+
+
+@test("titles never start with 'it' or 'its': the subject is put in, the source sentence stays exact")
+def _():
+    s = "House of Plantagenet"
+    assert elephant.with_subject("Its rule ended at Bosworth Field", s) == "House of Plantagenet's rule ended at Bosworth Field"
+    assert elephant.with_subject("He reigned until 1087", "William the Conqueror") == "William the Conqueror reigned until 1087"
+    assert elephant.with_subject("Henry II began its rule", s) == "Henry II began its rule"
+    assert elephant.with_subject("Its House of Plantagenet rule", s) == "Its House of Plantagenet rule"
+    assert elephant.subject_of("https://en.wikipedia.org/wiki/House_of_Plantagenet") == s
+    assert elephant.subject_of("https://news.google.com/rss/search?q=x") == ""
+    sents, heads = elephant.sentences_with_sections(
+        "The House of Plantagenet held the English throne from 1154 onwards.\n== Decline ==\n"
+        "Its rule ended when Richard III was killed at Bosworth in 1485.")
+    assert heads == ["", "Decline"] and sents[1].startswith("Its rule"), (sents, heads)
 
 
 @test("cards never overwrite, never leave temp files, and never leave the inbox")
@@ -807,6 +830,11 @@ def _():
     for c in cards:
         props = vault.read_frontmatter(vault.VAULT_DIR / c["path"])
         assert props["type"] == "card" and props["sources"][0].endswith("(Wikipedia)]]"), props
+        assert props["question"] == "English kings" and props.get("about"), props
+    titles = [c["title"] for c in cards]
+    assert not [x for x in titles if re.match(r"(?i)(its|it|he|she|they|his|her|their)\b", x)], titles
+    assert any(x.startswith(("House of Plantagenet's", "William the Conqueror", "Alfred the Great", "Henry VIII"))
+               for x in titles), titles
     sources = memory.cards("source")
     assert sources and all((vault.VAULT_DIR / s["path"]).exists() for s in sources)
     log = next(vault.INBOX.glob("Lobster log *.md")).read_text(encoding="utf-8")
@@ -1964,6 +1992,90 @@ def _():
         assert web.wifi_info() == {"ip": "10.221.143.222", "ssid": "S25"}
     finally:
         web.shutil.which, web.subprocess.run, web.wifi_ip = real_which, real_run, real_ip
+
+
+if certs.available():
+    @test("the app's certificate renews itself a month before it expires, and the doors pick it up")
+    def _():
+        old_days = certs.LEAF_DAYS
+        certs.LEAF_DAYS = 5                                  # a certificate that's already "expiring"
+        try:
+            c1, _ = certs.leaf(["127.0.0.1", "10.9.8.7"])
+            assert certs.expiring(c1) and certs.days_left(c1) <= 5
+            serial = lambda c: subprocess.run(["openssl", "x509", "-in", str(c), "-noout", "-serial"],
+                                              capture_output=True, text=True).stdout
+            s1 = serial(c1)
+            certs.LEAF_DAYS = old_days
+            c2, _ = certs.leaf(["127.0.0.1", "10.9.8.7"])
+            assert c2 == c1 and serial(c2) != s1, "an expiring certificate was reused"
+            assert not certs.expiring(c2) and certs.days_left(c2) > 300
+            port = _free_port()
+            d = web.Doors(web.App(_gate, _web_loop, set()), port, ["127.0.0.1"], [], True)
+            d.app.doors = d
+            d.refresh()
+            first = serial(d.cert_path)
+            real = certs.expiring
+            certs.expiring = lambda cert, days=30: True       # as if a year had passed
+            try:
+                d.refresh()                                   # checked at most hourly: not yet
+                assert serial(d.cert_path) == first, "renewal was checked on every refresh"
+                d.renew_checked = 0.0
+                d.refresh()                                   # the hourly check renews it
+            finally:
+                certs.expiring = real
+            assert serial(d.cert_path) != first, "the doors kept serving an expiring certificate"
+            assert any(r["kind"] == "web_certificate_renewed" for r in shiba.recent(30))
+            assert _https_get(port, certs.CA_CERT) == 401
+            d.close()
+        finally:
+            certs.LEAF_DAYS = old_days
+
+
+@test("the check-up runs anywhere, never crashes, and flags what's wrong without printing secrets")
+def _():
+    import doctor
+    results = doctor.checks()
+    text = "\n".join(line for _, line in results)
+    assert results and all(isinstance(ok, bool) for ok, _ in results)
+    assert config.VERSION in text and "Seal" in text
+    assert config.TELEGRAM_TOKEN not in text and "scrypt$" not in text, "the check-up printed a secret"
+    assert not any("couldn't check" in line for _, line in results), [l for _, l in results if "couldn't" in l]
+
+
+@test("update.sh stops on failing tests and never seals for you")
+def _():
+    sh = (Path(__file__).parent / "scripts" / "update.sh").read_text(encoding="utf-8")
+    assert subprocess.run(["sh", "-n", "scripts/update.sh"], cwd=Path(__file__).parent).returncode == 0
+    for line in sh.splitlines():
+        code = line.split("#")[0].strip()
+        if "seal.py" in code:
+            assert code.startswith("echo"), f"update.sh runs the seal: {line}"
+    assert "main()" in sh and 'main "$@"' in sh, "the script must be read whole before it runs"
+    assert "Tests failed: not restarting" in sh
+
+
+@test("the usage tally counts what you did this week from the existing logs")
+def _():
+    import usage
+    before = usage.tally()
+    shiba.audit("research_queued", job=999, question="x")
+    shiba.audit("decision", action="ask", text="x", tainted=False, verdict="ALLOW", reason="ok")
+    shiba.audit("decision", action="save_note", text="x", tainted=False, verdict="BLOCK", reason="paused")
+    shiba.audit("card_reviewed", card="lb-f1", status="verified")
+    shiba.audit("shared", what="note")
+    shiba.audit("held_note")
+    after = usage.tally()
+    diff = {k: after[k] - before[k] for k in after}
+    assert diff == {"research": 1, "ask": 1, "note": 0, "review": 1, "share": 1, "held": 1, "chat": 0}, diff
+    assert usage.line().startswith("📊 This week:")
+    srv, gate = _web_server()
+    c = _Client(srv)
+    c.login()
+    n = usage.tally()["share"]
+    c.req("POST", "/api/note", {"text": "Shared from Chrome", "id": "u-share-1", "via": "share"})
+    assert usage.tally()["share"] == n + 1
+    assert "usage" in c.req("GET", "/api/status")[1]
+    srv.shutdown()
 
 
 @test("logins survive a restart, but only as hashes; 'log out everywhere' ends them all")

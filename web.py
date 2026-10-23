@@ -46,6 +46,7 @@ import ollama
 import research
 import shiba
 import spider
+import usage
 import zim
 from store import append_jsonl, read_jsonl, timing_summary
 
@@ -290,7 +291,7 @@ class App:
                 "paused": shiba.paused(), "blocks_24h": shiba.blocks_last_day(),
                 "research_waiting": len(research.pending()), "now": self.now(), "busy": self.busy(),
                 "last_backup": memory.last_backup(), "research_seconds": t.get("research"),
-                "online": spider.online(), "ollama": ollama.version_problem(), "reply_speed": ollama.speed("chat"), "offline_wiki": [z.copy for z in zim.library(config.KIWIX_DIR)],
+                "online": spider.online(), "ollama": ollama.version_problem(), "reply_speed": ollama.speed("chat"), "usage": usage.tally(), "offline_wiki": [z.copy for z in zim.library(config.KIWIX_DIR)],
                 "doors": self.doors.urls() if self.doors else [],
                 "wifi": self.doors.wifi_note if self.doors and "wifi" in self.doors.entries else None,
                 "name": config.APP_NAME, "version": config.VERSION}
@@ -352,7 +353,16 @@ class App:
     def cancel(self, s, body):
         return {"reply": conversation.cancel(str(body.get("code", "")))}
 
+    @staticmethod
+    def _mark(body, what: str) -> None:
+        """For the usage tally only: was this sent from the Share menu, or held on a phone?"""
+        if body.get("via") == "share":
+            shiba.audit("shared", what=what)
+        if body.get("held") is True:
+            shiba.audit("held_note")
+
     def research_new(self, s, body):
+        self._mark(body, "research")
         return {"reply": conversation.research(self._text(body, "question", 500) or "")}
 
     def ask(self, s, body):
@@ -362,6 +372,7 @@ class App:
     def note(self, s, body):
         """Held notes from a phone carry an id, so a resend after a dropped connection saves once."""
         note_id = str(body.get("id", ""))[:64]
+        self._mark(body, "note")
         if not note_id:
             return {"reply": conversation.note(self._text(body, "text") or "")}
         with self.note_lock:
@@ -377,6 +388,7 @@ class App:
         return {"reply": reply}
 
     def save(self, s, body):
+        self._mark(body, "link")
         return {"reply": conversation.save_link(self._text(body, "url", 1000) or "")}
 
     def stop(self, s, body):
@@ -699,6 +711,8 @@ class Doors:
         self.lock = threading.Lock()
         self.ctx = None
         self.cert_for: tuple = ()
+        self.cert_path: Path | None = None
+        self.renew_checked = 0.0                           # renewal is checked at most hourly
         self.wifi_note = ""
         if tls:
             self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -742,10 +756,17 @@ class Doors:
     def refresh(self) -> list[str]:
         with self.lock:
             want = self.wanted()
-            if self.tls and not self.manual_cert and want and tuple(want) != self.cert_for:
+            renew = False
+            if self.tls and not self.manual_cert and self.cert_path and time.time() - self.renew_checked > 3600:
+                self.renew_checked = time.time()           # at most hourly: a quick openssl check
+                renew = certs.expiring(self.cert_path)
+            if self.tls and not self.manual_cert and want and (tuple(want) != self.cert_for or renew):
                 cert, key = certs.leaf([a for a in want if certs.allowed_address(a)] or ["127.0.0.1"])
                 self.ctx.load_cert_chain(cert, key)        # new handshakes use the new certificate
-                self.cert_for = tuple(want)
+                self.cert_for, self.cert_path = tuple(want), cert
+                self.renew_checked = time.time()               # just issued or checked: fine for an hour
+                if renew:
+                    shiba.audit("web_certificate_renewed", path=cert.name)
             for addr in [a for a in self.servers if a not in want]:
                 srv = self.servers.pop(addr)
                 srv.shutdown()

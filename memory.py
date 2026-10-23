@@ -27,7 +27,7 @@ import numpy as np
 import ollama
 from config import BACKUP_DIR, DB_PATH, EMBED_MODEL, MEMORY_MD
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 KEEP_BACKUPS = 14
 STATUSES = ("unreviewed", "verified", "wrong", "set_aside")   # set_aside: kept and used, just not worth reviewing
 
@@ -51,6 +51,7 @@ V2_COLUMNS = {                         # name -> definition, added in version 2
     "kind": "TEXT NOT NULL DEFAULT 'fact'",          # fact | reported_claim
     "status": "TEXT NOT NULL DEFAULT 'unreviewed'",  # unreviewed | verified | wrong
     "job": "INTEGER",
+    "section": "TEXT NOT NULL DEFAULT ''",          # v4: the heading of the part of the page it came from
 }
 V3 = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -147,11 +148,11 @@ def add_facts(items: list, tag: str, source: str, page: dict | None = None) -> i
         for r in new:
             cur = con.execute(
                 "INSERT OR IGNORE INTO facts (text, tag, source, added, text_hash, embedding, sentence, "
-                "fetched_at, published_at, kind, job) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "fetched_at, published_at, kind, job, section) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (r["text"], tag, source, now, _hash(r["text"]),
                  np.asarray(r.get("embedding") or [], dtype=np.float32).tobytes(),
                  r.get("sentence", ""), page.get("fetched_at", ""), page.get("published_at", ""),
-                 kind_of(r["text"]) if tag == "web" else "fact", page.get("job")))
+                 kind_of(r["text"]) if tag == "web" else "fact", page.get("job"), r.get("section", "")[:120]))
             if fts and cur.rowcount:
                 con.execute("INSERT INTO facts_fts(rowid, text) VALUES (?, ?)", (cur.lastrowid, r["text"]))
     con.close()
@@ -286,10 +287,10 @@ def card_detail(card_id: str) -> dict | None:
     """A card with its fact, the source sentence and its neighbours, and where it came from."""
     con = _db()
     r = con.execute("SELECT c.id, c.title, c.path, c.job, c.status, c.fact_id, f.text, f.sentence, f.source, "
-                    "f.fetched_at FROM cards c LEFT JOIN facts f ON f.id = c.fact_id WHERE c.id=? AND c.kind='card'",
-                    (card_id,)).fetchone()
+                    "f.fetched_at, f.section FROM cards c LEFT JOIN facts f ON f.id = c.fact_id "
+                    "WHERE c.id=? AND c.kind='card'", (card_id,)).fetchone()
     con.close()
-    keys = ("id", "title", "path", "job", "status", "fact_id", "text", "context", "source", "fetched_at")
+    keys = ("id", "title", "path", "job", "status", "fact_id", "text", "context", "source", "fetched_at", "section")
     return dict(zip(keys, r)) if r else None
 
 
@@ -301,9 +302,9 @@ def facts_for_sources(urls: list[str], limit: int = 40, per_source: int = 8) -> 
     con = _db()
     out = []
     for url in dict.fromkeys(urls):
-        rows = con.execute("SELECT id, text, source, sentence FROM facts WHERE tag='web' AND source=? "
+        rows = con.execute("SELECT id, text, source, sentence, section FROM facts WHERE tag='web' AND source=? "
                            "AND status != 'wrong' ORDER BY id LIMIT ?", (url, per_source)).fetchall()
-        out.extend({"id": i, "text": t, "source": s, "sentence": w} for i, t, s, w in rows)
+        out.extend({"id": i, "text": t, "source": s, "sentence": w, "section": h} for i, t, s, w, h in rows)
     con.close()
     return out[:limit]
 

@@ -137,7 +137,7 @@ async function flushOutbox() {
     for (const note of outbox()) {
       let reply;
       try {
-        reply = (await api("/api/note", { id: note.id, text: note.text })).reply;
+        reply = (await api("/api/note", { id: note.id, text: note.text, held: true })).reply;
       } catch (e) {
         if (e instanceof Unreachable || e instanceof LoggedOut) break;   // try again later
         reply = e.message;                                               // refused: show why, don't retry forever
@@ -189,10 +189,10 @@ function shareCard(m) {
     card.querySelectorAll("button").forEach((b) => (b.disabled = true));
     let reply;
     try {
-      if (kind === "note") reply = (await api("/api/note", { text: noteText, id: newId() })).reply;
-      if (kind === "link") reply = (await api("/api/save", { url: m.url })).reply;
+      if (kind === "note") reply = (await api("/api/note", { text: noteText, id: newId(), via: "share" })).reply;
+      if (kind === "link") reply = (await api("/api/save", { url: m.url, via: "share" })).reply;
       if (kind === "research") {
-        reply = (await api("/api/research", { question })).reply;
+        reply = (await api("/api/research", { question, via: "share" })).reply;
         const job = (reply || "").match(/Research #(\d+)(?: is)? queued/);
         if (job) watch(Number(job[1]));
       }
@@ -484,6 +484,8 @@ async function statusSheet() {
         dd("Held here", `${outbox().length} waiting`),
         ...(s.doors || []).flatMap((d) => dd(`App (${d.kind})`, d.url.replace("https://", ""))),
         ...(s.wifi ? dd("Wi-Fi door", s.wifi) : []),
+        ...(s.usage ? dd("📊 This week", Object.entries({ research: "research", ask: "asks", note: "notes", review: "reviews", share: "shares", held: "held notes", chat: "chats" })
+          .filter(([k]) => s.usage[k]).map(([k, label]) => `${s.usage[k]} ${label}`).join(" · ") || "nothing yet") : []),
         dd("Last backup", s.last_backup || "never"),
         dd("Version", s.version)),
       ...(s.ollama ? [h("p", { class: "error" }, `⚠️ ${s.ollama}`)] : []),
@@ -567,6 +569,7 @@ async function reviewScreen() {
       h("div", { class: "kicker" }, h("span", {}, "🐘 Does the card say what its source says?"), h("span", {}, `${i + 1} of ${cards.length}`)),
       ...badges(c.checks || {}),
       h("div", { class: "claim" }, c.title),
+      c.about || c.section ? h("div", { class: "hint small" }, [c.about ? `About ${c.about}` : "", c.section ? `section “${c.section}”` : ""].filter(Boolean).join(" · ")) : null,
       contextView(c),
       h("div", { class: "source-line" },
         h("span", {}, c.source_title || "Source"),

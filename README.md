@@ -146,3 +146,13 @@ Put a Kiwix Wikipedia file (e.g. `wikipedia_en_top_mini_2026-09.zim`) in `/stora
 - **Marking:** briefs mark offline sources "(offline copy)", and their source pages carry `copy:` with the file's name.
 - **Damaged or crafted files** are refused or skipped: offsets are checked, unpacked blocks are capped, and redirects stop after 5.
 - **Check it on the tablet:** `python zim.py "Hanseatic League"`
+
+## Looking after it
+
+- **Check-up:** `python doctor.py` prints one line per part, ✅ or ⚠️ with the fix. It covers the seal, Ollama and models, app doors, certificate expiry, the vault, backups, space, offline Wikipedia, start-up and the internet. It only looks; it changes nothing and prints no secrets.
+- **Updating:** `sh ~/lobster/scripts/update.sh` takes the newest `lobster-core*.zip` from Downloads, unpacks it, runs the tests and restarts.
+  - If the tests fail, it stops.
+  - If sealed files changed, it stops and shows the seal command: sealing stays your signature.
+- **Certificates:** the app's certificate renews itself 30 days before it expires (checked hourly).
+- **What you use:** `/status` and the app show this week's counts (research, asks, notes, reviews, shares, held notes). A short line arrives on Sunday evenings. These come from logs Sloth Lobster already keeps; nothing new is tracked.
+- **Cards (guide v2):** new cards carry `about`, `question` and `section`. A title never starts with "it" or "its": the subject is put in, and the source sentence stays exact.

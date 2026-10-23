@@ -163,6 +163,44 @@ def sentences(text: str) -> list[str]:
     return out
 
 
+HEADING = re.compile(r"^\s*(=+)\s*(.+?)\s*\1\s*$")
+
+
+def sentences_with_sections(text: str) -> tuple[list[str], list[str]]:
+    """sentences(), plus the heading each sentence sits under ("" before the first heading).
+    Wikipedia's plain text marks headings as == History ==."""
+    sents, heads, current, seen = [], [], "", set()
+    for line in text.split("\n"):
+        m = HEADING.match(line)
+        if m:
+            current = m.group(2)[:80]
+            continue
+        for s in sentences(line):
+            if s.lower() not in seen:
+                seen.add(s.lower())
+                sents.append(s)
+                heads.append(current)
+    return sents, heads
+
+
+# Titles must never start with a word that points elsewhere ("Its rule ended..."): put the
+# subject in, from the article's own name. Plain code; the sentence itself is unchanged.
+POINTER = re.compile(r"^(its|their|his|her|it|he|she|they|this|these)\s+(.+)$", re.I | re.S)
+
+
+def subject_of(url: str) -> str:
+    t = source_title(url)
+    return t[: -len(" (Wikipedia)")] if t.endswith(" (Wikipedia)") else ""
+
+
+def with_subject(claim: str, subject: str) -> str:
+    m = POINTER.match(claim.strip())
+    if not m or not subject or subject.lower() in claim.lower():
+        return claim
+    word, rest = m.group(1).lower(), m.group(2)
+    return f"{subject}'s {rest}" if word in ("its", "their", "his", "her") else f"{subject} {rest}"
+
+
 def embed(texts: list[str]) -> np.ndarray | None:
     """Normalised embeddings, or None if the embedding model is away (callers fall back to words)."""
     if not texts:
@@ -227,7 +265,7 @@ def feed_date(xml: str) -> str:
 def digest_file(path: Path) -> dict:
     page = json.loads(path.read_text(encoding="utf-8"))
     with timed("digest_page"):
-        sents = sentences(clean(page))
+        sents, heads = sentences_with_sections(clean(page))
         meta = {"fetched_at": page.get("fetched_at", ""), "job": page.get("job"),
                 "published_at": feed_date(page["content"]) if "<" in page["content"][:500] else ""}
         if page.get("origin") == "document":           # a /save document: index it for /ask
@@ -246,7 +284,7 @@ def digest_file(path: Path) -> dict:
                 shiba.audit("fact_rejected", source=page["url"], reason=problem, fact=fact)
                 continue
             window = " ".join(sents[max(0, i - 1):i + 2])
-            kept.append({"text": fact, "sentence": window, "embedding": vec})
+            kept.append({"text": fact, "sentence": window, "embedding": vec, "section": heads[i]})
         stored = memory.add_facts(kept, "web", page["url"], meta)
     return {"url": page["url"], "stored": stored, "rejected": rejected}
 
@@ -485,6 +523,7 @@ def brief(job: dict, urls: list[str], copies: dict[str, str] | None = None) -> d
         if not facts:
             return {"text": f"{head}\n\nNo usable facts came back. Try a narrower question.", "topic": "", "cards": 0}
         topic, points = choose_points(job["question"], facts)
+        points = [(i, with_subject(claim, subject_of(facts[i]["source"]))) for i, claim in points]
         # Only the sources the brief actually cites are listed and filed; every page read is
         # still in memory for /ask.
         numbers = {u: n for n, u in enumerate(dict.fromkeys(facts[i]["source"] for i, _ in points), 1)}
@@ -523,7 +562,9 @@ def file_brief(job: dict, topic: str, points: list[tuple[dict, str]], urls: list
             title = vault.unique_title(claim)
             loci = loci_for(fact["text"])
             path = vault.write_card(card_id, title, fact["text"], fact["sentence"] or fact["text"],
-                                    src_titles[fact["source"]], time.strftime("%Y-%m-%d"), map_title, loci)
+                                    src_titles[fact["source"]], time.strftime("%Y-%m-%d"), map_title, loci,
+                                    about=subject_of(fact["source"]), question=job["question"],
+                                    section=fact.get("section", ""))
             memory.add_card(card_id, "card", path.stem, vault.relative(path), fact_id=fact["id"], job=job["id"])
             title = path.stem
             new_cards += 1
@@ -638,6 +679,7 @@ def review_queue(limit: int = 30) -> list[dict]:
             continue
         d["checks"] = checks(d)
         d["source_title"] = source_title(d["source"]) if d.get("source") else ""
+        d["about"] = subject_of(d["source"]) if d.get("source") else ""
         d["question"] = questions.get(d["job"], "")
         out.append(d)
     def rank(d):

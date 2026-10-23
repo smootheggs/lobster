@@ -33,6 +33,7 @@ import ollama
 import research
 import shiba
 import spider
+import usage
 import zim
 import web
 from store import timing_summary
@@ -219,6 +220,7 @@ def status_lines() -> list[str]:
         f"🌐 Internet: {'online' if spider.online() else 'OFFLINE (research waits in the queue)'}",
         *([f"📚 Offline Wikipedia: {', '.join(z.copy for z in zim.library(config.KIWIX_DIR))}"]
           if spider.offline_available() else []),
+        usage.line(),
         *door_lines(),
         f"💾 Last backup: {memory.last_backup() or 'never'} · version {config.VERSION}",
     ]
@@ -361,6 +363,25 @@ async def run_research_jobs(app) -> None:
             await send(config.ALLOWED_USER_ID, r["brief"])
 
 
+WEEKLY_FILE = config.DATA_DIR / "usage_week.txt"
+
+
+async def weekly_usage(app) -> None:
+    """Sunday evening, once a week: one line of what you used. Two weeks of these decide
+    what's worth polishing and what can go."""
+    t = time.localtime()
+    week = time.strftime("%G-W%V", t)
+    if t.tm_wday != 6 or t.tm_hour < 18:
+        return
+    try:
+        if WEEKLY_FILE.exists() and WEEKLY_FILE.read_text().strip() == week:
+            return
+        WEEKLY_FILE.write_text(week)
+        await app.bot.send_message(config.ALLOWED_USER_ID, await asyncio.to_thread(usage.line))
+    except Exception:
+        log.exception("Weekly usage line failed")
+
+
 async def background(app: Application) -> None:
     await asyncio.sleep(20)
     try:
@@ -373,6 +394,7 @@ async def background(app: Application) -> None:
             if time.time() - state["last_review_sync"] > REVIEW_SYNC_EVERY:
                 state["last_review_sync"] = time.time()
                 await asyncio.to_thread(elephant.sync_reviews)
+            await weekly_usage(app)
             charging = await asyncio.to_thread(is_charging)
             # Unknown (no Termux:API): still back up once a day rather than never.
             if (charging or charging is None) and time.time() - state["last_backup_try"] > 20 * 3600:
